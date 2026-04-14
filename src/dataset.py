@@ -77,7 +77,7 @@ class ActiveMatterDataset(Dataset):
         self,
         data_dir,
         split="train",
-        n_frames=16,
+        n_frames=32,
         stride=1,
         normalize=True,
         crop_size=224,
