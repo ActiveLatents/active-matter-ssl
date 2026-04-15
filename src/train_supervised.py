@@ -19,6 +19,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import wandb
+from tqdm import tqdm
 
 from src.dataset import ActiveMatterDataset
 from src.supervised_baseline import SupervisedBaseline
@@ -63,13 +64,15 @@ def make_loader(data_dir, split, n_frames, stride, batch_size, num_workers, shuf
     )
 
 
-def run_epoch(model, loader, criterion, optimizer, device, train: bool):
+def run_epoch(model, loader, criterion, optimizer, device, train: bool, epoch, n_epochs):
     model.train(train)
     total_loss = 0.0
     n_samples = 0
+    phase = "train" if train else "val"
 
+    pbar = tqdm(loader, desc=f"Epoch {epoch}/{n_epochs} [{phase}]", leave=False)
     with torch.set_grad_enabled(train):
-        for frames, labels in loader:
+        for frames, labels in pbar:
             frames = frames.to(device, non_blocking=True)   # (B, T, 11, 224, 224)
             labels = labels.to(device, non_blocking=True)   # (B, 2)
 
@@ -83,6 +86,7 @@ def run_epoch(model, loader, criterion, optimizer, device, train: bool):
 
             total_loss += loss.item() * frames.size(0)
             n_samples  += frames.size(0)
+            pbar.set_postfix(loss=f"{total_loss / n_samples:.4f}")
 
     return total_loss / n_samples
 
@@ -141,8 +145,8 @@ def main():
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
 
-        train_loss = run_epoch(model, train_loader, criterion, optimizer, device, train=True)
-        val_loss   = run_epoch(model, val_loader,   criterion, optimizer, device, train=False)
+        train_loss = run_epoch(model, train_loader, criterion, optimizer, device, train=True,  epoch=epoch, n_epochs=args.epochs)
+        val_loss   = run_epoch(model, val_loader,   criterion, optimizer, device, train=False, epoch=epoch, n_epochs=args.epochs)
         scheduler.step()
 
         elapsed = time.time() - t0
