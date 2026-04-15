@@ -12,6 +12,8 @@ Usage:
 
 import argparse
 import os
+import signal
+import sys
 import time
 
 import torch
@@ -44,6 +46,8 @@ def parse_args():
                    help="W&B run name (auto-generated if omitted)")
     p.add_argument("--no_wandb",  action="store_true",
                    help="Disable W&B logging")
+    p.add_argument("--resume", default=None,
+                   help="Path to last.pt checkpoint to resume from")
     return p.parse_args()
 
 
@@ -135,14 +139,47 @@ def main():
         optimizer, T_max=args.epochs
     )
 
-    # ── Training loop ─────────────────────────────────────────────────────────
+    # ── Resume ────────────────────────────────────────────────────────────────
+    start_epoch = 1
     best_val_loss = float("inf")
+
+    if args.resume and os.path.isfile(args.resume):
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt["state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        scheduler.load_state_dict(ckpt["scheduler"])
+        start_epoch   = ckpt["epoch"] + 1
+        best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        print(f"Resumed from epoch {ckpt['epoch']} (best val {best_val_loss:.4f})")
+
+    # ── Signal handler: save checkpoint and exit on SIGUSR1 (pre-emption) ────
+    def _save_and_exit(signum, frame):
+        print("\nSIGUSR1 received — saving checkpoint and exiting for requeue.")
+        _save_checkpoint("last.pt", epoch=start_epoch - 1)
+        if use_wandb:
+            wandb.finish()
+        sys.exit(0)
+
+    def _save_checkpoint(filename, epoch):
+        torch.save({
+            "epoch":         epoch,
+            "state_dict":    model.state_dict(),
+            "optimizer":     optimizer.state_dict(),
+            "scheduler":     scheduler.state_dict(),
+            "best_val_loss": best_val_loss,
+            "args":          vars(args),
+        }, os.path.join(args.output_dir, filename))
+
+    signal.signal(signal.SIGUSR1, _save_and_exit)
+
+    # ── Training loop ─────────────────────────────────────────────────────────
     log_path = os.path.join(args.output_dir, "log.csv")
+    write_mode = "a" if args.resume and os.path.isfile(log_path) else "w"
+    with open(log_path, write_mode) as f:
+        if write_mode == "w":
+            f.write("epoch,train_loss,val_loss,lr,elapsed_s\n")
 
-    with open(log_path, "w") as f:
-        f.write("epoch,train_loss,val_loss,lr,elapsed_s\n")
-
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
 
         train_loss = run_epoch(model, train_loader, criterion, optimizer, device, train=True,  epoch=epoch, n_epochs=args.epochs)
@@ -166,18 +203,15 @@ def main():
                 "train/loss": train_loss,
                 "val/loss":   val_loss,
                 "lr":         current_lr,
-            }, step=epoch)
+            }, step=epoch, commit=True)
+
+        # Always save last checkpoint (for resume)
+        _save_checkpoint("last.pt", epoch=epoch)
 
         # Save best checkpoint
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            ckpt = {
-                "epoch":      epoch,
-                "state_dict": model.state_dict(),
-                "val_loss":   val_loss,
-                "args":       vars(args),
-            }
-            torch.save(ckpt, os.path.join(args.output_dir, "best.pt"))
+            _save_checkpoint("best.pt", epoch=epoch)
             print(f"  -> saved best (val {val_loss:.4f})")
             if use_wandb:
                 wandb.run.summary["best_val_loss"] = val_loss
