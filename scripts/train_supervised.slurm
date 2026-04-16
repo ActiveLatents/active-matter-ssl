@@ -18,13 +18,12 @@
 # ── Environment ───────────────────────────────────────────────────────────────
 module purge
 singularity exec --nv \
-    --overlay /scratch/sk12590/overlay-25GB-500K.ext3:ro \
-    /scratch/work/public/singularity/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif \
+    --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-500K.ext3:rw \
+    /share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif \
     /bin/bash -c "
         source /ext3/env.sh
 
         cd /scratch/sk12590/active-matter-ssl
-        mkdir -p logs runs/supervised
 
         python -m src.train_supervised \
             --data_dir    /scratch/sk12590/dl_project_data/data \
