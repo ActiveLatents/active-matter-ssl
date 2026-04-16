@@ -32,7 +32,7 @@ def parse_args():
     p.add_argument("--data_dir",   default="/scratch/sk12590/dl_project_data/data")
     p.add_argument("--output_dir", default="runs/supervised")
     p.add_argument("--n_frames",   type=int,   default=32)
-    p.add_argument("--stride",     type=int,   default=4,
+    p.add_argument("--stride",     type=int,   default=1,
                    help="Window stride when building the dataset index")
     p.add_argument("--embed_dim",  type=int,   default=256)
     p.add_argument("--epochs",     type=int,   default=50)
