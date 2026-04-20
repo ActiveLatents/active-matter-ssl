@@ -43,7 +43,7 @@ singularity exec --nv --overlay /scratch/sk12590/overlay-25GB-500K.ext3:rw \
             --weight_decay 0.05 \
             --warmup_epochs 10 \
             --grad_clip 1.0 \
-            --log_every 1 \
+            --log_every 50 \
             --val_every 5 \
             --wandb_project active-matter-ssl \
             --run_name cfjepa-v1 \
