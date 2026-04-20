@@ -9,6 +9,7 @@
 #SBATCH --output=logs/ssl_%j.out
 #SBATCH --error=logs/ssl_%j.err
 #SBATCH --requeue
+#SBATCH --signal=USR1@120
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=sk12590@nyu.edu
 
