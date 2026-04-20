@@ -268,6 +268,9 @@ def train(args):
             # Step
             optimizer.step()
 
+            # EMA update of target encoder
+            model.update_ema(args.ema_decay)
+
             epoch_loss += loss.item()
             global_step += 1
 
@@ -281,6 +284,7 @@ def train(args):
                     "train/sigreg_global_var": loss_dict["sigreg_global_var"].item(),
                     "train/sigreg_global_cov": loss_dict["sigreg_global_cov"].item(),
                     "train/lr": lr,
+                    "train/ema_decay": args.ema_decay,
                     "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "train/epoch": epoch,
                     "train/step": global_step,
@@ -375,6 +379,8 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=0.05)
     parser.add_argument("--warmup_epochs", type=int, default=10)
     parser.add_argument("--grad_clip", type=float, default=1.0)
+    parser.add_argument("--ema_decay", type=float, default=0.996,
+                        help="EMA decay for target encoder (0.996-0.999)")
 
     # Logging
     parser.add_argument("--log_every", type=int, default=1)

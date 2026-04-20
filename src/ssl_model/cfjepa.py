@@ -1,29 +1,25 @@
-# src/model/cfjepa.py
+# src/ssl_model/cfjepa.py
 
 """
-Channel-Factored JEPA (CF-JEPA).
+Channel-Factored JEPA (CF-JEPA) with EMA target encoder.
 
-Top-level model that orchestrates:
-  - Channel-factored patch embedding
-  - Shared ViT encoder
-  - Lightweight predictor
-  - Within-field and cross-field masking
-  - Combined loss (prediction + SIGReg)
-
-Training flow:
-  1. Embed each field group into tokens (separate projections)
-  2. Add positional + field-type encodings
+Training flow (I-JEPA style):
+  1. Online patch embedding → tokens for visible context
+  2. Target patch embedding (EMA) → full tokens → target encoder (EMA) → targets
   3. Generate within-field and cross-field masks
-  4. Get prediction targets: run ALL tokens through encoder (detached)
-  5. Get encoder output: run only VISIBLE tokens through encoder
-  6. Predictor takes visible representations + mask tokens, predicts masked
-  7. Compute prediction loss + SIGReg
+  4. Online encoder processes VISIBLE tokens only (2 passes, with gradients)
+  5. Predictor reconstructs masked target representations
+  6. Loss = prediction loss + SIGReg on online encoder outputs
+
+The EMA target encoder provides stable, non-collapsing targets.
+update_ema() must be called after every optimizer step.
 
 Evaluation flow (linear probe / kNN):
-  1. Embed + encode ALL tokens (no masking)
+  1. Target encoder encodes ALL tokens (most stable representations)
   2. Pool to a single representation vector
-  3. Use pooled representation for downstream regression
 """
+
+import copy
 
 import torch
 import torch.nn as nn
@@ -32,7 +28,7 @@ from .patch_embed import ChannelFactoredPatchEmbed
 from .encoder import ViTEncoder
 from .predictor import Predictor
 from .masking import generate_masks, batch_mask_indices
-from .losses import CFJEPALoss
+from .losses import prediction_loss, sigreg_loss
 
 
 class CFJEPA(nn.Module):
@@ -68,8 +64,13 @@ class CFJEPA(nn.Module):
         super().__init__()
 
         self.within_mask_ratio = within_mask_ratio
+        self.lambda_within = lambda_within
+        self.lambda_cross = lambda_cross
+        self.lambda_sigreg = lambda_sigreg
+        self.sigreg_var_weight = sigreg_var_weight
+        self.sigreg_cov_weight = sigreg_cov_weight
 
-        # Modules
+        # ── Online modules (receive gradients) ──────────────────────────
         self.patch_embed = ChannelFactoredPatchEmbed(
             embed_dim=embed_dim,
             tube_t=tube_t,
@@ -96,23 +97,39 @@ class CFJEPA(nn.Module):
             mlp_ratio=mlp_ratio,
         )
 
-        self.criterion = CFJEPALoss(
-            lambda_within=lambda_within,
-            lambda_cross=lambda_cross,
-            lambda_sigreg=lambda_sigreg,
-            sigreg_var_weight=sigreg_var_weight,
-            sigreg_cov_weight=sigreg_cov_weight,
-        )
+        # ── Target modules (EMA copy, no gradients) ─────────────────────
+        self.target_patch_embed = copy.deepcopy(self.patch_embed)
+        self.target_encoder = copy.deepcopy(self.encoder)
+
+        for p in self.target_patch_embed.parameters():
+            p.requires_grad_(False)
+        for p in self.target_encoder.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update_ema(self, decay: float):
+        """
+        Update target encoder via exponential moving average of online encoder.
+        Call after every optimizer.step().
+
+        target = decay * target + (1 - decay) * online
+        """
+        for online, target in zip(
+            self.patch_embed.parameters(), self.target_patch_embed.parameters()
+        ):
+            target.data.mul_(decay).add_(online.data, alpha=1.0 - decay)
+
+        for online, target in zip(
+            self.encoder.parameters(), self.target_encoder.parameters()
+        ):
+            target.data.mul_(decay).add_(online.data, alpha=1.0 - decay)
 
     def _gather_tokens(self, tokens, indices):
         """
-        Gather tokens at given indices from the sequence dimension.
-
-        Args:
-            tokens:  (B, N_total, D)
-            indices: (B, N_select)
-        Returns:
-            (B, N_select, D)
+        Gather tokens at given indices.
+        tokens:  (B, N, D)
+        indices: (B, K)
+        returns: (B, K, D)
         """
         D = tokens.shape[-1]
         idx = indices.unsqueeze(-1).expand(-1, -1, D)
@@ -120,15 +137,17 @@ class CFJEPA(nn.Module):
 
     def forward_ssl(self, field_dict):
         """
-        Full SSL training forward pass.
+        SSL training forward pass with EMA target encoder.
 
-        Three encoder passes:
-          A. All tokens (with gradients) -- used for SIGReg and as
-             prediction targets (detached when used as targets)
-          B. Within-field visible tokens -- fed to predictor for
-             within-field prediction
-          C. Cross-field visible tokens -- fed to predictor for
-             cross-field prediction
+        Two online encoder passes (with gradients):
+          B. Within-field visible tokens
+          C. Cross-field visible tokens
+
+        One target encoder pass (no gradient):
+          T. All tokens → stable prediction targets
+
+        SIGReg is applied to combined online encoder outputs to prevent
+        online encoder collapse.
 
         Args:
             field_dict: dict with keys (concentration, velocity, orientation,
@@ -140,8 +159,8 @@ class CFJEPA(nn.Module):
         """
         device = next(self.parameters()).device
 
-        # 1. Embed all field groups into tokens
-        all_tokens, field_indices, grid_shape = self.patch_embed(field_dict)
+        # 1. Online patch embedding
+        all_tokens, field_indices, _ = self.patch_embed(field_dict)
         B, N_total, D = all_tokens.shape
 
         # 2. Generate masks
@@ -151,93 +170,113 @@ class CFJEPA(nn.Module):
             device=device,
         )
 
-        # 3. Pass A: encode ALL tokens (with gradients)
-        #    Serves dual purpose: SIGReg regularization + prediction targets
-        full_encoder_out = self.encoder(all_tokens)
+        # 3. Target pass: EMA encoder on ALL tokens (no gradient)
+        with torch.no_grad():
+            target_tokens, _, _ = self.target_patch_embed(field_dict)
+            full_target_out = self.target_encoder(target_tokens)
 
-        # ── Within-field path ───────────────────────────────────────────
-        w_vis_ids = batch_mask_indices(within_masks["visible_ids"], B)
-        w_mask_ids = batch_mask_indices(within_masks["masked_ids"], B)
+        # ── Within-field online pass ────────────────────────────────────
+        w_vis_ids  = batch_mask_indices(within_masks["visible_ids"], B)
+        w_mask_ids = batch_mask_indices(within_masks["masked_ids"],  B)
 
-        # Pass B: encode only within-field visible tokens
         w_visible_tokens = self._gather_tokens(all_tokens, w_vis_ids)
-        w_encoder_out = self.encoder(w_visible_tokens)
+        w_encoder_out    = self.encoder(w_visible_tokens)
 
-        # Predict masked tokens
-        w_preds = self.predictor(
+        w_preds   = self.predictor(
             visible_tokens=w_encoder_out,
             visible_indices=w_vis_ids,
             masked_indices=w_mask_ids,
             total_tokens=N_total,
         )
+        w_targets = self._gather_tokens(full_target_out, w_mask_ids)
 
-        # Targets: detach from pass A
-        w_targets = self._gather_tokens(full_encoder_out, w_mask_ids).detach()
+        # ── Cross-field online pass ─────────────────────────────────────
+        c_vis_ids  = batch_mask_indices(cross_masks["visible_ids"], B)
+        c_mask_ids = batch_mask_indices(cross_masks["masked_ids"],  B)
 
-        # ── Cross-field path ────────────────────────────────────────────
-        c_vis_ids = batch_mask_indices(cross_masks["visible_ids"], B)
-        c_mask_ids = batch_mask_indices(cross_masks["masked_ids"], B)
-
-        # Pass C: encode only cross-field visible tokens
         c_visible_tokens = self._gather_tokens(all_tokens, c_vis_ids)
-        c_encoder_out = self.encoder(c_visible_tokens)
+        c_encoder_out    = self.encoder(c_visible_tokens)
 
-        # Predict the masked group
-        c_preds = self.predictor(
+        c_preds   = self.predictor(
             visible_tokens=c_encoder_out,
             visible_indices=c_vis_ids,
             masked_indices=c_mask_ids,
             total_tokens=N_total,
         )
+        c_targets = self._gather_tokens(full_target_out, c_mask_ids)
 
-        # Targets: detach from pass A
-        c_targets = self._gather_tokens(full_encoder_out, c_mask_ids).detach()
+        # ── Losses ─────────────────────────────────────────────────────
+        l_within = prediction_loss(w_preds, w_targets)
+        l_cross  = prediction_loss(c_preds, c_targets)
 
-        # ── Compute combined loss ───────────────────────────────────────
-        total_loss, loss_dict = self.criterion(
-            within_preds=w_preds,
-            within_targets=w_targets,
-            cross_preds=c_preds,
-            cross_targets=c_targets,
-            encoder_output=full_encoder_out,  # SIGReg uses this (has gradients)
-            field_indices=field_indices,
+        # SIGReg on combined online outputs — prevents online encoder collapse
+        online_out = torch.cat([w_encoder_out, c_encoder_out], dim=1)
+        l_sigreg, var_l, cov_l = sigreg_loss(
+            online_out,
+            var_weight=self.sigreg_var_weight,
+            cov_weight=self.sigreg_cov_weight,
         )
+
+        total_loss = (
+            self.lambda_within  * l_within
+            + self.lambda_cross * l_cross
+            + self.lambda_sigreg * l_sigreg
+        )
+
+        loss_dict = {
+            "loss_total":        total_loss.detach(),
+            "loss_within":       l_within.detach(),
+            "loss_cross":        l_cross.detach(),
+            "sigreg_total":      l_sigreg.detach(),
+            "sigreg_global_var": var_l,
+            "sigreg_global_cov": cov_l,
+        }
 
         return total_loss, loss_dict
 
     @torch.no_grad()
     def encode(self, field_dict, pool="mean"):
         """
-        Extract frozen representations for evaluation (linear probe / kNN).
+        Extract representations for evaluation (linear probe / kNN).
+        Uses the target encoder — its representations are more stable
+        than the online encoder since it is updated via EMA.
 
         Args:
             field_dict: dict with field group tensors
             pool:       "mean" for mean pooling over all tokens
 
         Returns:
-            features: (B, embed_dim) -- pooled representation
+            features: (B, embed_dim)
         """
-        all_tokens, field_indices, _ = self.patch_embed(field_dict)
-        encoder_out = self.encoder(all_tokens)
+        target_tokens, _, _ = self.target_patch_embed(field_dict)
+        encoder_out = self.target_encoder(target_tokens)
 
         if pool == "mean":
-            features = encoder_out.mean(dim=1)  # (B, D)
-        else:
-            raise ValueError(f"Unknown pooling: {pool}")
-
-        return features
+            return encoder_out.mean(dim=1)
+        raise ValueError(f"Unknown pooling: {pool}")
 
     def param_count(self):
-        """Print parameter counts per module."""
+        """Print trainable and total parameter counts."""
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total     = sum(p.numel() for p in self.parameters())
+
+        components = {
+            "patch_embed (online)":  self.patch_embed,
+            "encoder (online)":      self.encoder,
+            "predictor":             self.predictor,
+            "patch_embed (target)":  self.target_patch_embed,
+            "encoder (target)":      self.target_encoder,
+        }
         counts = {}
-        counts["patch_embed"] = sum(p.numel() for p in self.patch_embed.parameters())
-        counts["encoder"] = sum(p.numel() for p in self.encoder.parameters())
-        counts["predictor"] = sum(p.numel() for p in self.predictor.parameters())
-        counts["total"] = sum(p.numel() for p in self.parameters())
+        for name, module in components.items():
+            n = sum(p.numel() for p in module.parameters())
+            print(f"  {name:25s}: {n / 1e6:.2f}M")
+            counts[name] = n
 
-        for name, count in counts.items():
-            print(f"  {name:15s}: {count / 1e6:.2f}M")
-
+        print(f"  {'trainable':25s}: {trainable / 1e6:.2f}M")
+        print(f"  {'total':25s}: {total / 1e6:.2f}M")
+        counts["trainable"] = trainable
+        counts["total"] = total
         return counts
 
 
@@ -262,7 +301,6 @@ if __name__ == "__main__":
     print("Parameter counts:")
     model.param_count()
 
-    # Fake SSL batch
     B = 2
     field_dict = {
         "concentration": torch.randn(B, 16, 1, 256, 256),
@@ -277,6 +315,10 @@ if __name__ == "__main__":
     for k, v in loss_dict.items():
         print(f"  {k}: {v:.4f}")
 
-    print("\nEvaluation encode...")
+    # EMA update
+    model.update_ema(decay=0.996)
+    print("\nEMA update: OK")
+
+    print("\nEvaluation encode (target encoder)...")
     features = model.encode(field_dict)
     print(f"Features: {features.shape}")  # (2, 384)

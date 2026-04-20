@@ -43,6 +43,7 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --weight_decay 0.05 \
             --warmup_epochs 10 \
             --grad_clip 1.0 \
+            --ema_decay 0.996 \
             --log_every 50 \
             --val_every 5 \
             --wandb_project active-matter-ssl \
