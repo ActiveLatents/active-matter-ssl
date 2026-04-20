@@ -110,8 +110,9 @@ def generate_masks(field_indices, within_mask_ratio=0.75, device="cpu"):
     )
 
     # Cross-field: randomly pick one group to mask entirely
+    # Use torch RNG so this is reproducible with torch.manual_seed
     group_names = list(field_indices.keys())
-    target_group = random.choice(group_names)
+    target_group = group_names[torch.randint(len(group_names), (1,), device=device).item()]
     c_visible, c_masked = cross_field_mask(
         field_indices, target_group=target_group, device=device,
     )
@@ -140,7 +141,7 @@ def batch_mask_indices(mask_ids, batch_size):
     Returns:
         (B, N) batched indices
     """
-    return mask_ids.unsqueeze(0).expand(batch_size, -1)
+    return mask_ids.unsqueeze(0).expand(batch_size, -1).contiguous()
 
 
 # ── Quick test ──────────────────────────────────────────────────────────────

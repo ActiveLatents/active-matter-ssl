@@ -97,8 +97,8 @@ class Predictor(nn.Module):
         # Project visible tokens to predictor dimension
         visible = self.input_proj(visible_tokens)  # (B, N_vis, predictor_dim)
 
-        # Create mask tokens
-        mask_tokens = self.mask_token.expand(B, N_mask, -1)  # (B, N_mask, predictor_dim)
+        # Create mask tokens (cast to match visible dtype, e.g. bfloat16 under autocast)
+        mask_tokens = self.mask_token.to(visible.dtype).expand(B, N_mask, -1)
 
         # Combine visible + mask tokens and restore original ordering
         all_tokens = torch.zeros(

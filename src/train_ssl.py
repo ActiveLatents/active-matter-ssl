@@ -16,6 +16,8 @@ Usage:
 
 import argparse
 import os
+import signal
+import sys
 import time
 
 import torch
@@ -134,12 +136,14 @@ def train(args):
     }
 
     # ── Wandb ───────────────────────────────────────────────────
-    wandb.init(
-        project=args.wandb_project,
-        name=args.run_name,
-        config=config,
-        resume="allow",
-    )
+    use_wandb = not args.no_wandb
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.run_name,
+            config=config,
+            resume="allow",
+        )
 
     # ── Data ────────────────────────────────────────────────────
     print("Loading data...")
@@ -217,10 +221,24 @@ def train(args):
         )
         start_epoch += 1  # start from next epoch
 
+    # ── SIGUSR1 handler: checkpoint and exit for Slurm requeue ──
+    current_epoch = start_epoch
+
+    def _save_and_exit(signum, frame):
+        print("\nSIGUSR1 received — saving checkpoint and exiting for requeue.")
+        save_checkpoint(ckpt_path, model, optimizer, scaler,
+                        current_epoch, global_step, best_val_loss, config)
+        if use_wandb:
+            wandb.finish()
+        sys.exit(0)
+
+    signal.signal(signal.SIGUSR1, _save_and_exit)
+
     # ── Training ────────────────────────────────────────────────
     print(f"\nStarting training from epoch {start_epoch}...")
 
     for epoch in range(start_epoch, args.epochs):
+        current_epoch = epoch
         model.train()
         epoch_loss = 0.0
         epoch_start = time.time()
@@ -267,7 +285,8 @@ def train(args):
                     "train/epoch": epoch,
                     "train/step": global_step,
                 }
-                wandb.log(log_dict, step=global_step)
+                if use_wandb:
+                    wandb.log(log_dict, step=global_step)
 
                 print(
                     f"  [{epoch+1}/{args.epochs}] "
@@ -289,7 +308,8 @@ def train(args):
         if (epoch + 1) % args.val_every == 0:
             print("  Running validation...")
             val_metrics = validate(model, val_loader, device)
-            wandb.log(val_metrics, step=global_step)
+            if use_wandb:
+                wandb.log(val_metrics, step=global_step)
             print(f"  val/loss: {val_metrics['val/loss']:.4f}")
 
             # Save best model
@@ -317,7 +337,8 @@ def train(args):
     }, encoder_path)
     print(f"\nEncoder weights saved: {encoder_path}")
 
-    wandb.finish()
+    if use_wandb:
+        wandb.finish()
     print("Training complete.")
 
 
@@ -360,6 +381,7 @@ if __name__ == "__main__":
     parser.add_argument("--val_every", type=int, default=5)
     parser.add_argument("--wandb_project", type=str, default="cfjepa-active-matter")
     parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
 
     # Checkpointing
     parser.add_argument("--checkpoint_dir", type=str, default="/scratch/sk12590/active-matter-ssl/runs/ssl")

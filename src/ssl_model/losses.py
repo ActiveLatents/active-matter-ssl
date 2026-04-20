@@ -62,6 +62,9 @@ def sigreg_loss(embeddings, var_weight=1.0, cov_weight=1.0, var_target=1.0):
     if embeddings.dim() == 3:
         embeddings = embeddings.reshape(-1, embeddings.shape[-1])
 
+    # Cast to float32: covariance matmul in bfloat16 loses too much precision
+    embeddings = embeddings.float()
+
     B, D = embeddings.shape
 
     # Center the embeddings
