@@ -14,19 +14,19 @@ the heavy encoder only processes visible tokens.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class Attention(nn.Module):
-    """Multi-head self-attention."""
+    """Multi-head self-attention with Flash Attention (O(N) memory)."""
 
     def __init__(self, dim, n_heads=6, qkv_bias=True, attn_drop=0.0, proj_drop=0.0):
         super().__init__()
         self.n_heads = n_heads
         self.head_dim = dim // n_heads
-        self.scale = self.head_dim ** -0.5
+        self.attn_drop_p = attn_drop
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
@@ -39,12 +39,11 @@ class Attention(nn.Module):
         )
         q, k, v = qkv.unbind(0)
 
-        # Scaled dot-product attention (uses PyTorch 2.0+ efficient impl)
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
+        # Flash Attention: O(N) memory, never materializes the N×N matrix
+        dropout_p = self.attn_drop_p if self.training else 0.0
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
