@@ -40,6 +40,16 @@ def get_lr(step, total_steps, warmup_steps, base_lr, min_lr=1e-6):
         return min_lr + 0.5 * (base_lr - min_lr) * (1 + __import__("math").cos(__import__("math").pi * progress))
 
 
+def get_ema_decay(step, total_steps, ema_start=0.996, ema_end=0.9998):
+    """Cosine EMA momentum schedule (I-JEPA §4.4): ramps from ema_start → ema_end.
+    A slowly-increasing τ keeps the target encoder meaningfully ahead of the
+    online encoder throughout training, preventing the bootstrap target from
+    collapsing into a trivial copy of the online encoder.
+    """
+    progress = step / max(total_steps, 1)
+    return ema_end - (ema_end - ema_start) * (1 + __import__("math").cos(__import__("math").pi * progress)) / 2
+
+
 def set_lr(optimizer, lr):
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
@@ -133,6 +143,8 @@ def train(args):
         "weight_decay": args.weight_decay,
         "warmup_epochs": args.warmup_epochs,
         "grad_clip": args.grad_clip,
+        "ema_start": args.ema_start,
+        "ema_end": args.ema_end,
     }
 
     # ── Wandb ───────────────────────────────────────────────────
@@ -268,8 +280,9 @@ def train(args):
             # Step
             optimizer.step()
 
-            # EMA update of target encoder
-            model.update_ema(args.ema_decay)
+            # EMA update of target encoder (scheduled momentum)
+            ema_decay = get_ema_decay(global_step, total_steps, args.ema_start, args.ema_end)
+            model.update_ema(ema_decay)
 
             epoch_loss += loss.item()
             global_step += 1
@@ -284,7 +297,7 @@ def train(args):
                     "train/sigreg_global_var": loss_dict["sigreg_global_var"].item(),
                     "train/sigreg_global_cov": loss_dict["sigreg_global_cov"].item(),
                     "train/lr": lr,
-                    "train/ema_decay": args.ema_decay,
+                    "train/ema_decay": ema_decay,
                     "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "train/epoch": epoch,
                     "train/step": global_step,
@@ -379,8 +392,10 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=0.05)
     parser.add_argument("--warmup_epochs", type=int, default=10)
     parser.add_argument("--grad_clip", type=float, default=1.0)
-    parser.add_argument("--ema_decay", type=float, default=0.996,
-                        help="EMA decay for target encoder (0.996-0.999)")
+    parser.add_argument("--ema_start", type=float, default=0.996,
+                        help="EMA momentum at step 0 (I-JEPA cosine schedule)")
+    parser.add_argument("--ema_end", type=float, default=0.9998,
+                        help="EMA momentum at final step (I-JEPA cosine schedule)")
 
     # Logging
     parser.add_argument("--log_every", type=int, default=1)
