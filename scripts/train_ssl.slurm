@@ -47,6 +47,6 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --log_every 50 \
             --val_every 5 \
             --wandb_project active-matter-ssl \
-            --run_name cfjepa-v1 \
+            --run_name cfjepa-v2_ema \
             --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl
         "
