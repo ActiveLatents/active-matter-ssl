@@ -21,7 +21,7 @@ import time
 import torch
 import torch.nn as nn
 import wandb
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 
 from src.dataset import build_dataloader
 from src.ssl_model import CFJEPA
@@ -80,7 +80,7 @@ def validate(model, val_loader, device):
     for batch in val_loader:
         field_dict = {k: v.to(device) for k, v in batch.items() if k != "labels"}
 
-        with autocast(device_type="cuda", dtype=torch.bfloat16):
+        with autocast("cuda", dtype=torch.bfloat16):
             loss, loss_dict = model.forward_ssl(field_dict)
 
         total_loss += loss.item()
@@ -193,7 +193,7 @@ def train(args):
         betas=(0.9, 0.95),
     )
 
-    scaler = GradScaler(enabled=False)  # bf16 doesn't need loss scaling
+    scaler = GradScaler("cuda", enabled=False)  # bf16 doesn't need loss scaling
 
     # ── LR schedule info ────────────────────────────────────────
     steps_per_epoch = len(train_loader)
@@ -235,7 +235,7 @@ def train(args):
 
             # Forward
             optimizer.zero_grad()
-            with autocast(device_type="cuda", dtype=torch.bfloat16):
+            with autocast("cuda", dtype=torch.bfloat16):
                 loss, loss_dict = model.forward_ssl(field_dict)
 
             # Backward
