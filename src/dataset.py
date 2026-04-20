@@ -1,24 +1,33 @@
-# src/dataset.py
-
 import glob
 import os
+import random
 import re
 
 import h5py
 import numpy as np
 import torch
 import yaml
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 
-# Channel order for stacking
+# ── Channel layout ──────────────────────────────────────────────────────────
 CHANNEL_NAMES = [
-    "concentration",
-    "velocity_x", "velocity_y",
-    "D_xx", "D_xy", "D_yx", "D_yy",
-    "E_xx", "E_xy", "E_yx", "E_yy",
+    "concentration",                          # 1 ch  (scalar)
+    "velocity_x", "velocity_y",               # 2 ch  (vector)
+    "D_xx", "D_xy", "D_yx", "D_yy",          # 4 ch  (orientation tensor)
+    "E_xx", "E_xy", "E_yx", "E_yy",          # 4 ch  (strain-rate tensor)
 ]
 
+# Field group definitions: (name, channel_start, channel_end)
+FIELD_GROUPS = {
+    "concentration": (0, 1),    # 1 channel
+    "velocity":      (1, 3),    # 2 channels
+    "orientation":   (3, 7),    # 4 channels
+    "strain_rate":   (7, 11),   # 4 channels
+}
+
+
+# ── Normalization helpers ───────────────────────────────────────────────────
 
 def load_channel_stats(stats_path):
     """Load per-channel mean and std from stats.yaml."""
@@ -67,21 +76,39 @@ def parse_params_from_filename(filepath):
 
 class ActiveMatterDataset(Dataset):
     """
-    Dataset for active_matter simulations.
+    Flexible dataset for active_matter simulations.
 
-    Each sample is a 16-frame window extracted from an 81-timestep trajectory.
-    Windows are extracted with a configurable stride.
+    Supports two modes controlled by `mode`:
+      - "supervised" : returns (frames, labels)
+                       frames shape: (T, 11, H, W)
+      - "ssl"        : returns a dict with channel-factored tensors + labels
+                       keys: concentration, velocity, orientation, strain_rate,
+                             labels
+
+    Temporal windowing:
+      - Each trajectory has 81 timesteps
+      - `n_frames` controls the window length (e.g., 16)
+      - `stride` controls spacing between sliding windows
+      - All valid windows are extracted deterministically
+
+    Spatial handling:
+      - Raw spatial resolution is 256x256
+      - `crop_size=None` keeps 256x256 (recommended for training from scratch)
+      - `crop_size=224` does a center crop (for compatibility with baselines)
+      - `random_crop` applies random spatial crop instead of center crop
     """
 
     def __init__(
         self,
         data_dir,
         split="train",
-        n_frames=32,
+        n_frames=16,
         stride=1,
         normalize=True,
-        crop_size=224,
+        crop_size=None,
+        random_crop=False,
         stats_path=None,
+        mode="supervised",
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -90,38 +117,69 @@ class ActiveMatterDataset(Dataset):
         self.stride = stride
         self.normalize = normalize
         self.crop_size = crop_size
+        self.random_crop = random_crop
+        self.mode = mode
+
+        assert mode in ("supervised", "ssl"), f"Unknown mode: {mode}"
 
         # Load normalization stats
         if self.normalize:
             if stats_path is None:
-                # Default: look for stats.yaml one level above data_dir
                 stats_path = os.path.join(os.path.dirname(data_dir), "stats.yaml")
             self.channel_mean, self.channel_std = load_channel_stats(stats_path)
 
+        # Discover files
         split_dir = os.path.join(data_dir, split)
         self.file_paths = sorted(glob.glob(os.path.join(split_dir, "*.hdf5")))
 
-        # Build an index: list of (file_path, traj_idx, start_frame, zeta, alpha)
+        # Build index: sliding windows over every trajectory
         self.samples = []
         for fp in self.file_paths:
             zeta, alpha = parse_params_from_filename(fp)
             with h5py.File(fp, "r") as f:
                 n_traj = f["t0_fields"]["concentration"].shape[0]
                 n_steps = f["t0_fields"]["concentration"].shape[1]
-
             for traj_idx in range(n_traj):
                 max_start = n_steps - n_frames
                 for start in range(0, max_start + 1, stride):
                     self.samples.append((fp, traj_idx, start, zeta, alpha))
 
-        print(f"[{split}] {len(self.samples)} samples from {len(self.file_paths)} files")
+        print(
+            f"[{split}] {len(self.samples)} samples from {len(self.file_paths)} files "
+            f"(mode={mode}, n_frames={n_frames}, stride={stride})"
+        )
 
-    def _center_crop(self, x):
-        """Center crop from 256x256 to crop_size x crop_size."""
+    def _apply_crop(self, x):
+        """
+        Apply spatial crop if crop_size is set.
+        x shape: (T, C, H, W)
+        """
+        if self.crop_size is None:
+            return x
+
         _, _, h, w = x.shape
-        top = (h - self.crop_size) // 2
-        left = (w - self.crop_size) // 2
+        if self.crop_size >= h:
+            return x
+
+        if self.random_crop and self.split == "train":
+            top = random.randint(0, h - self.crop_size)
+            left = random.randint(0, w - self.crop_size)
+        else:
+            top = (h - self.crop_size) // 2
+            left = (w - self.crop_size) // 2
+
         return x[:, :, top : top + self.crop_size, left : left + self.crop_size]
+
+    def _split_channels(self, frames):
+        """
+        Split the 11-channel tensor into field groups.
+        frames shape: (T, 11, H, W)
+        Returns dict of tensors, each (T, C_group, H, W).
+        """
+        result = {}
+        for name, (start, end) in FIELD_GROUPS.items():
+            result[name] = frames[:, start:end]
+        return result
 
     def __len__(self):
         return len(self.samples)
@@ -136,42 +194,106 @@ class ActiveMatterDataset(Dataset):
             D = f["t2_fields"]["D"][traj_idx, start:end]
             E = f["t2_fields"]["E"][traj_idx, start:end]
 
-        # Stack into 11 channels: (16, 11, 256, 256)
+        # Stack into (T, 11, 256, 256)
         frames = np.stack([
             conc,
-            vel[..., 0],
-            vel[..., 1],
-            D[..., 0, 0],
-            D[..., 0, 1],
-            D[..., 1, 0],
-            D[..., 1, 1],
-            E[..., 0, 0],
-            E[..., 0, 1],
-            E[..., 1, 0],
-            E[..., 1, 1],
+            vel[..., 0], vel[..., 1],
+            D[..., 0, 0], D[..., 0, 1], D[..., 1, 0], D[..., 1, 1],
+            E[..., 0, 0], E[..., 0, 1], E[..., 1, 0], E[..., 1, 1],
         ], axis=1).astype(np.float32)
 
+        # Normalize
         if self.normalize:
             frames = (frames - self.channel_mean) / (self.channel_std + 1e-8)
 
-        frames = self._center_crop(frames)
+        # Spatial crop
+        frames = self._apply_crop(frames)
+
+        # Convert to tensor
         frames = torch.from_numpy(frames)
         labels = torch.tensor([zeta, alpha], dtype=torch.float32)
 
-        return frames, labels
+        # Return based on mode
+        if self.mode == "supervised":
+            return frames, labels
 
+        elif self.mode == "ssl":
+            field_dict = self._split_channels(frames)
+            field_dict["labels"] = labels
+            return field_dict
+
+
+def build_dataloader(
+    data_dir,
+    split="train",
+    mode="supervised",
+    n_frames=16,
+    stride=1,
+    batch_size=4,
+    num_workers=4,
+    crop_size=None,
+    random_crop=False,
+    stats_path=None,
+):
+    """Build a DataLoader with sensible defaults for each mode and split."""
+
+    dataset = ActiveMatterDataset(
+        data_dir=data_dir,
+        split=split,
+        n_frames=n_frames,
+        stride=stride,
+        normalize=True,
+        crop_size=crop_size,
+        random_crop=random_crop,
+        stats_path=stats_path,
+        mode=mode,
+    )
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=(split == "train"),
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=(split == "train"),
+        persistent_workers=(num_workers > 0),
+    )
+
+    return loader
+
+
+# ── Quick sanity check ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from torch.utils.data import DataLoader
 
     data_dir = "/scratch/sk12590/dl_project_data/data"
 
-    for split in ["train", "valid", "test"]:
-        ds = ActiveMatterDataset(data_dir, split=split, stride=1)
+    print("=" * 60)
+    print("SUPERVISED MODE")
+    print("=" * 60)
+    loader = build_dataloader(
+        data_dir, split="train", mode="supervised",
+        n_frames=16, stride=16, batch_size=4, num_workers=0,
+    )
+    frames, labels = next(iter(loader))
+    print(f"  frames : {frames.shape}")        # (B, 16, 11, 256, 256)
+    print(f"  labels : {labels.shape}")        # (B, 2)
+    print(f"  range  : [{frames.min():.3f}, {frames.max():.3f}]")
 
-    ds = ActiveMatterDataset(data_dir, split="train", stride=1)
-    loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0)
-    batch_frames, batch_labels = next(iter(loader))
-    print(f"Batch frames: {batch_frames.shape}")
-    print(f"Batch labels: {batch_labels.shape}")
-    print(f"Frames min={batch_frames.min():.3f}, max={batch_frames.max():.3f}")
+    print()
+    print("=" * 60)
+    print("SSL MODE")
+    print("=" * 60)
+    loader = build_dataloader(
+        data_dir, split="train", mode="ssl",
+        n_frames=16, batch_size=4, num_workers=0,
+    )
+    batch = next(iter(loader))
+    for key, val in batch.items():
+        if isinstance(val, torch.Tensor):
+            print(f"  {key:15s} : {val.shape}")
+        # concentration   : (B, 16, 1, 256, 256)
+        # velocity        : (B, 16, 2, 256, 256)
+        # orientation     : (B, 16, 4, 256, 256)
+        # strain_rate     : (B, 16, 4, 256, 256)
+        # labels          : (B, 2)

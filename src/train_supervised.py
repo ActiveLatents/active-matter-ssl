@@ -24,7 +24,7 @@ import wandb
 from tqdm import tqdm
 
 from src.dataset import ActiveMatterDataset
-from src.supervised_baseline import SupervisedBaseline
+from src.models import SupervisedBaseline
 
 
 def parse_args():
