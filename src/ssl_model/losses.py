@@ -21,7 +21,7 @@ import torch.nn.functional as F
 
 def prediction_loss(predictions, targets):
     """
-    Smooth L1 loss between predicted and target representations.
+    MSE loss between predicted and target representations.
 
     Args:
         predictions: (B, N_mask, D) -- predictor output at masked positions
@@ -31,7 +31,7 @@ def prediction_loss(predictions, targets):
     Returns:
         scalar loss
     """
-    return F.smooth_l1_loss(predictions, targets)
+    return F.mse_loss(predictions, targets)
 
 
 # ── SIGReg ──────────────────────────────────────────────────────────────────
