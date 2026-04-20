@@ -30,6 +30,7 @@ singularity exec --nv \
             --output_dir  runs/supervised \
             --epochs      50 \
             --batch_size  4 \
+            --n_frames    32 \
             --lr          1e-3 \
             --stride      1 \
             --num_workers 8 \

@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class CNNEncoder(nn.Module):
-    """Simple CNN encoder that processes a single frame (11, 224, 224) -> feature vector."""
+    """Simple CNN encoder: (C, H, W) -> embed_dim. AdaptiveAvgPool handles any H/W."""
 
     def __init__(self, in_channels=11, embed_dim=256):
         super().__init__()
@@ -32,9 +32,9 @@ class CNNEncoder(nn.Module):
 class SupervisedBaseline(nn.Module):
     """
     Per-frame CNN encoder + temporal mean pooling + linear regression head.
-    
-    Input: (B, T, 11, 224, 224)  -- T frames, 11 channels
-    Output: (B, 2)               -- predicted [zeta, alpha]
+
+    Input: (B, T, 11, H, W)  -- T frames, 11 channels, any spatial size
+    Output: (B, 2)            -- predicted [zeta, alpha]
     """
 
     def __init__(self, in_channels=11, embed_dim=256, n_targets=2):

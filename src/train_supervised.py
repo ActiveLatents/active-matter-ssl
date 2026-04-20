@@ -65,6 +65,7 @@ def make_loader(data_dir, split, n_frames, stride, batch_size, num_workers, shuf
         num_workers=num_workers,
         pin_memory=True,
         drop_last=(split == "train"),
+        persistent_workers=(num_workers > 0),
     )
 
 
@@ -142,6 +143,7 @@ def main():
     # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 1
     best_val_loss = float("inf")
+    current_epoch = 0
 
     if args.resume and os.path.isfile(args.resume):
         ckpt = torch.load(args.resume, map_location=device)
@@ -150,12 +152,13 @@ def main():
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch   = ckpt["epoch"] + 1
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        current_epoch = ckpt["epoch"]
         print(f"Resumed from epoch {ckpt['epoch']} (best val {best_val_loss:.4f})")
 
     # ── Signal handler: save checkpoint and exit on SIGUSR1 (pre-emption) ────
     def _save_and_exit(signum, frame):
         print("\nSIGUSR1 received — saving checkpoint and exiting for requeue.")
-        _save_checkpoint("last.pt", epoch=start_epoch - 1)
+        _save_checkpoint("last.pt", epoch=current_epoch)
         if use_wandb:
             wandb.finish()
         sys.exit(0)
@@ -180,6 +183,7 @@ def main():
             f.write("epoch,train_loss,val_loss,lr,elapsed_s\n")
 
     for epoch in range(start_epoch, args.epochs + 1):
+        current_epoch = epoch
         t0 = time.time()
 
         train_loss = run_epoch(model, train_loader, criterion, optimizer, device, train=True,  epoch=epoch, n_epochs=args.epochs)
