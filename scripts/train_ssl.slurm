@@ -37,7 +37,7 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --within_mask_ratio 0.75 \
             --lambda_within 1.0 \
             --lambda_cross 1.0 \
-            --lambda_sigreg 0.01 \
+            --lambda_sigreg 0.1 \
             --epochs 50 \
             --base_lr 1.5e-4 \
             --weight_decay 0.05 \

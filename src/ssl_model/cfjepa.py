@@ -218,12 +218,14 @@ class CFJEPA(nn.Module):
         l_within = prediction_loss(w_preds, w_targets)
         l_cross  = prediction_loss(c_preds, c_targets)
 
-        # Fix 3: SIGReg on mean-pooled per-sample representations (B, D).
-        # Pooling first forces diverse per-sample summaries rather than
-        # trivially satisfying token-level variance within each sample.
-        online_pooled = torch.cat([w_encoder_out, c_encoder_out], dim=1).mean(dim=1)
+        # SIGReg on all online encoder tokens (B×N_visible, D).
+        # Token-level gives ~3000 samples per step → reliable variance estimates.
+        # Strong SIGReg here forces diverse token representations in the online
+        # encoder, which propagates to the target encoder via EMA, making the
+        # prediction task non-trivial.
+        online_out = torch.cat([w_encoder_out, c_encoder_out], dim=1)
         l_sigreg, var_l, cov_l = sigreg_loss(
-            online_pooled,
+            online_out,
             var_weight=self.sigreg_var_weight,
             cov_weight=self.sigreg_cov_weight,
         )
