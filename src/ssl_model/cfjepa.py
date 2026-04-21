@@ -121,7 +121,7 @@ class CFJEPA(nn.Module):
         device = next(self.parameters()).device
 
         # 1. Patch embedding
-        all_tokens, field_indices, grid_shape = self.patch_embed(field_dict)
+        all_tokens, field_indices, grid_shape, pos_ids = self.patch_embed(field_dict)
         B, N_total, D = all_tokens.shape
 
         # 2. Generate spatiotemporal block masks
@@ -134,20 +134,25 @@ class CFJEPA(nn.Module):
 
         # 3. Target pass: full encoder on all tokens, no stop-gradient.
         # SIGReg is the sole anti-collapse mechanism — no heuristics needed.
-        full_target_out = self.encoder(all_tokens)
+        # pos_ids: (N_total, 3) → expand to (B, N_total, 3) for encoder
+        full_pos_ids = pos_ids.unsqueeze(0).expand(B, -1, -1)
+        full_target_out = self.encoder(all_tokens, pos_ids=full_pos_ids)
 
         # ── Within-field online pass ────────────────────────────────────
         w_vis_ids  = batch_mask_indices(within_masks["visible_ids"], B)
         w_mask_ids = batch_mask_indices(within_masks["masked_ids"],  B)
 
         w_visible_tokens = self._gather_tokens(all_tokens, w_vis_ids)
-        w_encoder_out    = self.encoder(w_visible_tokens)
+        # Gather pos_ids for visible token subset: (B, N_vis, 3)
+        w_pos_ids = pos_ids[w_vis_ids]
+        w_encoder_out    = self.encoder(w_visible_tokens, pos_ids=w_pos_ids)
 
         w_preds   = self.predictor(
             visible_tokens=w_encoder_out,
             visible_indices=w_vis_ids,
             masked_indices=w_mask_ids,
             total_tokens=N_total,
+            pos_ids=pos_ids,
         )
         w_targets = F.normalize(
             self._gather_tokens(full_target_out, w_mask_ids).float(), dim=-1
@@ -158,13 +163,15 @@ class CFJEPA(nn.Module):
         c_mask_ids = batch_mask_indices(cross_masks["masked_ids"],  B)
 
         c_visible_tokens = self._gather_tokens(all_tokens, c_vis_ids)
-        c_encoder_out    = self.encoder(c_visible_tokens)
+        c_pos_ids = pos_ids[c_vis_ids]
+        c_encoder_out    = self.encoder(c_visible_tokens, pos_ids=c_pos_ids)
 
         c_preds   = self.predictor(
             visible_tokens=c_encoder_out,
             visible_indices=c_vis_ids,
             masked_indices=c_mask_ids,
             total_tokens=N_total,
+            pos_ids=pos_ids,
         )
         c_targets = F.normalize(
             self._gather_tokens(full_target_out, c_mask_ids).float(), dim=-1
@@ -174,11 +181,10 @@ class CFJEPA(nn.Module):
         l_within = prediction_loss(w_preds, w_targets)
         l_cross  = prediction_loss(c_preds, c_targets)
 
-        # Per-sample SIGReg: forces each sample's token representations to be
-        # Gaussian-distributed across the token dimension. Prevents the encoder
-        # from mapping all tokens within a sample to the same direction.
-        online_out = torch.cat([w_encoder_out, c_encoder_out], dim=1)  # (B, N, D)
-        l_sigreg = sigreg_loss(online_out)
+        # SIGReg on the full target pass: full_target_out sees all tokens in a
+        # single coherent attention context and is the learning target, making
+        # it the right place to enforce Gaussian-distributed representations.
+        l_sigreg = sigreg_loss(full_target_out)
 
         total_loss = (
             self.lambda_within  * l_within
@@ -207,8 +213,10 @@ class CFJEPA(nn.Module):
         Returns:
             features: (B, embed_dim)
         """
-        all_tokens, _, _ = self.patch_embed(field_dict)
-        encoder_out = self.encoder(all_tokens)
+        all_tokens, _, _, pos_ids = self.patch_embed(field_dict)
+        B = all_tokens.shape[0]
+        full_pos_ids = pos_ids.unsqueeze(0).expand(B, -1, -1)
+        encoder_out = self.encoder(all_tokens, pos_ids=full_pos_ids)
 
         if pool == "mean":
             return encoder_out.mean(dim=1)

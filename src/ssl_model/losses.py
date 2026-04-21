@@ -16,6 +16,7 @@ Two components:
 
 import torch
 import torch.nn.functional as F
+import math
 
 
 # ── Prediction loss ─────────────────────────────────────────────────────────
@@ -42,66 +43,45 @@ def prediction_loss(predictions, targets):
 
 # ── SIGReg ───────────────────────────────────────────────────────────────────
 
-def sigreg_loss(x, sketch_dim=64, n_integration=17):
+def sigreg_loss(x, sketch_dim=64):
     """
     Per-sample Sketched Isotropic Gaussian Regularization (SIGReg).
-
-    Applies ECF matching INDEPENDENTLY for each sample's N token representations,
-    then averages over the batch. This is the critical distinction from global
-    (batch-level) ECF matching.
-
-    The collapse mode we are fighting: at initialization, all N tokens within
-    sample i collapse to the same representation direction c_i. The global
-    distribution of (B*N) tokens can look Gaussian (if c_i ~ N(0,I) across
-    samples), satisfying batch-level SIGReg. But per-sample, each sample is a
-    Dirac delta with ECF = exp(it·proj(c_i)), which looks nothing like a
-    Gaussian CF = exp(-t²/2). Per-sample SIGReg directly detects and penalizes
-    this.
-
-    Algorithm (per sample b):
-      1. Project sample b's N tokens: proj_b = x_b @ A  (N, sketch_dim)
-      2. Empirical CF per sample: ECF_b(t) = mean_n[exp(it * proj_b)]  (sketch_dim, T)
-      3. Compare to Gaussian CF: G(t) = exp(-t²/2)
-      4. Loss_b = integral |ECF_b(t) - G(t)|² * G(t) dt
-      5. Return mean over B samples
-
-    Args:
-        x:              (B, N, D) — one row of N token representations per sample.
-                        If (N, D), treated as a single sample (B=1).
-        sketch_dim:     random projection dimension
-        n_integration:  number of quadrature points for trapezoid integration
-
-    Returns:
-        scalar loss (≥ 0; equals 0 when each sample's tokens are Gaussian)
+    
+    Computes the exact closed-form analytical solution of the Epps-Pulley 
+    statistic (which is mathematically equivalent to Gaussian RBF MMD) 
+    along 1D random projections.
     """
     if x.dim() == 2:
         x = x.unsqueeze(0)  # treat as B=1
 
     B, N, D = x.shape
-
-    # Cast to float32: complex exponential loses precision in bfloat16
     x = x.float()
 
-    # 1. Shared random unit-column projection: D → sketch_dim
+    # 1. Shared random unit-column projection: D -> sketch_dim
     A = torch.randn(D, sketch_dim, device=x.device)
     A = A / (A.norm(p=2, dim=0, keepdim=True) + 1e-6)
 
-    # 2. Integration points and theoretical Gaussian CF
-    t = torch.linspace(-5, 5, n_integration, device=x.device)       # (T,)
-    gauss_cf = torch.exp(-0.5 * t ** 2)                              # (T,)
-
-    # 3. Per-sample empirical CF
-    #    proj:  (B, N, sketch_dim)
-    #    args:  (B, N, sketch_dim, T)
-    #    ecf:   (B, sketch_dim, T)  — mean over N tokens within each sample
+    # 2. Project data
+    # proj: (B, N, sketch_dim)
     proj = x @ A
-    args = proj.unsqueeze(-1) * t.view(1, 1, 1, -1)
-    ecf  = torch.exp(1j * args).mean(dim=1)
 
-    # 4. Gaussian-weighted L2, integrated via trapezoid rule
-    diff_sq = (ecf - gauss_cf.view(1, 1, -1)).abs().square()         # (B, sketch_dim, T)
-    err     = diff_sq * gauss_cf.view(1, 1, -1)
-    loss    = torch.trapezoid(err, t, dim=-1)                         # (B, sketch_dim)
+    # 3. Exact Analytical Epps-Pulley Integral (MMD)
+    
+    # Term 1: 1/N^2 * sum(exp(-0.5 * (z_j - z_k)^2))
+    z1 = proj.unsqueeze(2)  # (B, N, 1, sketch_dim)
+    z2 = proj.unsqueeze(1)  # (B, 1, N, sketch_dim)
+    diff_sq = (z1 - z2).square()  # (B, N, N, sketch_dim)
+    term1 = torch.exp(-0.5 * diff_sq).mean(dim=(1, 2))  # (B, sketch_dim)
+
+    # Term 2: sqrt(2)/N * sum(exp(-0.25 * z_j^2))
+    term2 = math.sqrt(2.0) * torch.exp(-0.25 * proj.square()).mean(dim=1)  # (B, sketch_dim)
+
+    # Term 3: Constant 1/sqrt(3)
+    term3 = 1.0 / math.sqrt(3.0)
+
+    # Combine terms. Multiplying by sqrt(2*pi) matches the exact scale of 
+    # the integrated ECF formula.
+    loss = (term1 - term2 + term3) * math.sqrt(2 * math.pi)
 
     return loss.mean()  # average over batch and sketch dimensions
 
@@ -109,7 +89,6 @@ def sigreg_loss(x, sketch_dim=64, n_integration=17):
 # ── Quick test ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import torch
 
     B, N, D = 4, 512, 384
 

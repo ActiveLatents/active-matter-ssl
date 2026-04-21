@@ -14,7 +14,7 @@ learn good representations rather than offloading that work to the predictor.
 import torch
 import torch.nn as nn
 
-from .encoder import TransformerBlock
+from .encoder import RoPE3D, TransformerBlock
 
 
 class Predictor(nn.Module):
@@ -40,6 +40,9 @@ class Predictor(nn.Module):
         depth=4,
         n_heads=6,
         mlp_ratio=4.0,
+        max_t=8,
+        max_h=16,
+        max_w=16,
     ):
         super().__init__()
         self.encoder_dim = encoder_dim
@@ -50,6 +53,9 @@ class Predictor(nn.Module):
 
         # Learnable mask token
         self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_dim))
+
+        # 3D RoPE for predictor attention (uses predictor head_dim)
+        self.rope = RoPE3D(predictor_dim // n_heads, max_t=max_t, max_h=max_h, max_w=max_w)
 
         # Transformer blocks
         self.blocks = nn.ModuleList([
@@ -79,17 +85,18 @@ class Predictor(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
-    def forward(self, visible_tokens, visible_indices, masked_indices, total_tokens):
+    def forward(self, visible_tokens, visible_indices, masked_indices, total_tokens,
+                pos_ids=None):
         """
         Args:
-            visible_tokens:  (B, N_vis, encoder_dim) -- encoder output for visible tokens
-            visible_indices: (B, N_vis) -- original positions of visible tokens
-            masked_indices:  (B, N_mask) -- original positions of masked tokens
-            total_tokens:    int -- total number of tokens (visible + masked)
+            visible_tokens:  (B, N_vis, encoder_dim)
+            visible_indices: (B, N_vis) -- original token positions
+            masked_indices:  (B, N_mask) -- original token positions
+            total_tokens:    int
+            pos_ids:         (total_tokens, 3) -- (t, h, w) per token; used for RoPE
 
         Returns:
-            predictions: (B, N_mask, encoder_dim) -- predicted representations
-                         for the masked positions
+            predictions: (B, N_mask, encoder_dim)
         """
         B, N_vis, _ = visible_tokens.shape
         N_mask = masked_indices.shape[1]
@@ -99,30 +106,27 @@ class Predictor(nn.Module):
 
         # Create mask tokens (cast to match visible dtype, e.g. bfloat16 under autocast)
         mask_tokens = self.mask_token.to(visible.dtype).expand(B, N_mask, -1)
-
+        
         # Combine visible + mask tokens and restore original ordering
         all_tokens = torch.zeros(
             B, total_tokens, self.predictor_dim,
             device=visible.device, dtype=visible.dtype,
         )
 
-        # Scatter visible tokens to their original positions
-        vis_idx = visible_indices.unsqueeze(-1).expand(-1, -1, self.predictor_dim)
-        all_tokens.scatter_(1, vis_idx, visible)
-
-        # Scatter mask tokens to their original positions
+        vis_idx  = visible_indices.unsqueeze(-1).expand(-1, -1, self.predictor_dim)
         mask_idx = masked_indices.unsqueeze(-1).expand(-1, -1, self.predictor_dim)
+        all_tokens.scatter_(1, vis_idx, visible)
         all_tokens.scatter_(1, mask_idx, mask_tokens)
 
-        # Run through transformer
+        # Expand pos_ids to batch: (1, total_tokens, 3) broadcasts across B
+        rope = self.rope if pos_ids is not None else None
+        batch_pos = pos_ids.unsqueeze(0) if pos_ids is not None else None
+
         for block in self.blocks:
-            all_tokens = block(all_tokens)
+            all_tokens = block(all_tokens, rope=rope, pos_ids=batch_pos)
         all_tokens = self.norm(all_tokens)
 
-        # Extract predictions at masked positions only
         predictions = torch.gather(all_tokens, 1, mask_idx)
-
-        # Project back to encoder dim
         predictions = self.output_proj(predictions)  # (B, N_mask, encoder_dim)
 
         return predictions

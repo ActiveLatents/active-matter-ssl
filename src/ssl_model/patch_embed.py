@@ -8,10 +8,12 @@ gets its own 3D convolutional projection. All projections output the same
 embedding dimension so tokens can be concatenated and fed into a shared
 transformer.
 
-Positional information is added via three summed embeddings:
-  - spatial position  (shared across groups and time)
-  - temporal position (shared across groups and space)
-  - field group identity (one learnable vector per group)
+Positional information is NOT added here as additive embeddings.  Instead,
+each token's (t, h, w) grid index is returned as `pos_ids` so that 3D RoPE
+can be applied inside every attention layer.
+
+A learnable field-group identity vector (one per group) is still added here
+to let the model distinguish physical field types.
 """
 
 import torch
@@ -116,15 +118,7 @@ class ChannelFactoredPatchEmbed(nn.Module):
             for name in self.GROUP_NAMES
         })
 
-        # Positional embeddings (shared across field groups)
-        self.spatial_embed = nn.Parameter(
-            torch.zeros(1, self.n_h * self.n_w, embed_dim)
-        )
-        self.temporal_embed = nn.Parameter(
-            torch.zeros(1, self.n_t, embed_dim)
-        )
-
-        # Field group identity embeddings
+        # Field group identity embeddings (semantic type, not spatial position)
         self.field_embed = nn.ParameterDict({
             name: nn.Parameter(torch.zeros(1, 1, embed_dim))
             for name in self.GROUP_NAMES
@@ -133,36 +127,24 @@ class ChannelFactoredPatchEmbed(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        nn.init.trunc_normal_(self.spatial_embed, std=0.02)
-        nn.init.trunc_normal_(self.temporal_embed, std=0.02)
         for name in self.GROUP_NAMES:
             nn.init.trunc_normal_(self.field_embed[name], std=0.02)
 
-    def _add_position_encoding(self, tokens, field_name):
+    def _make_pos_ids(self, device):
         """
-        Add spatial + temporal + field-type position encoding to tokens.
+        Return (t, h, w) grid indices for every token in one field group.
 
-        tokens: (B, n_t * n_h * n_w, embed_dim)
+        Token ordering matches TubeletEmbedding: Conv3d output is
+        (B, D, n_t, n_h, n_w), flattened in row-major order so w varies
+        fastest, then h, then t.
+
+        Returns: (tokens_per_group, 3)  — same for every group and batch item
         """
-        B = tokens.shape[0]
-        n_t, n_hw = self.n_t, self.n_h * self.n_w
-
-        # Reshape to (B, n_t, n_hw, D) to add positional embeddings
-        tokens = tokens.view(B, n_t, n_hw, -1)
-
-        # Add spatial embedding: broadcast over batch and time
-        tokens = tokens + self.spatial_embed.unsqueeze(1)  # (1, 1, n_hw, D)
-
-        # Add temporal embedding: broadcast over batch and space
-        tokens = tokens + self.temporal_embed.unsqueeze(2)  # (1, n_t, 1, D)
-
-        # Flatten back to (B, n_t * n_hw, D)
-        tokens = tokens.view(B, n_t * n_hw, -1)
-
-        # Add field group identity
-        tokens = tokens + self.field_embed[field_name]
-
-        return tokens
+        t = torch.arange(self.n_t, device=device)
+        h = torch.arange(self.n_h, device=device)
+        w = torch.arange(self.n_w, device=device)
+        grid_t, grid_h, grid_w = torch.meshgrid(t, h, w, indexing="ij")
+        return torch.stack([grid_t.flatten(), grid_h.flatten(), grid_w.flatten()], dim=-1)
 
     def forward(self, field_dict):
         """
@@ -172,17 +154,24 @@ class ChannelFactoredPatchEmbed(nn.Module):
         Returns:
             all_tokens:    (B, total_tokens, embed_dim)
             field_indices: dict mapping group name to (start_idx, end_idx)
-                           into the token sequence
             grid_shape:    (n_t, n_h, n_w) tuple
+            pos_ids:       (total_tokens, 3) — (t, h, w) index per token,
+                           shared across all batches and field groups
         """
+        device = next(iter(field_dict.values())).device
         all_tokens = []
         field_indices = {}
         offset = 0
 
+        group_pos = self._make_pos_ids(device)  # (tokens_per_group, 3)
+
         for name in self.GROUP_NAMES:
             x = field_dict[name]
             tokens, grid_shape = self.embeds[name](x)
-            tokens = self._add_position_encoding(tokens, name)
+
+            # Only field-type identity is added here; spatial/temporal
+            # position is handled by 3D RoPE inside the transformer.
+            tokens = tokens + self.field_embed[name]
 
             n_tokens = tokens.shape[1]
             field_indices[name] = (offset, offset + n_tokens)
@@ -192,7 +181,11 @@ class ChannelFactoredPatchEmbed(nn.Module):
 
         all_tokens = torch.cat(all_tokens, dim=1)  # (B, total_tokens, embed_dim)
 
-        return all_tokens, field_indices, grid_shape
+        # Replicate pos_ids for each field group (same grid for all groups)
+        n_groups = len(self.GROUP_NAMES)
+        pos_ids = group_pos.repeat(n_groups, 1)  # (total_tokens, 3)
+
+        return all_tokens, field_indices, grid_shape, pos_ids
 
 
 # ── Quick test ──────────────────────────────────────────────────────────────
@@ -212,10 +205,11 @@ if __name__ == "__main__":
         "strain_rate":   torch.randn(B, 16, 4, 256, 256),
     }
 
-    tokens, field_indices, grid_shape = embed(field_dict)
+    tokens, field_indices, grid_shape, pos_ids = embed(field_dict)
 
-    print(f"Total tokens: {tokens.shape}")  # (2, 8192, 384)
-    print(f"Grid shape:   {grid_shape}")    # (8, 16, 16)
+    print(f"Total tokens: {tokens.shape}")   # (2, 8192, 384)
+    print(f"Grid shape:   {grid_shape}")     # (8, 16, 16)
+    print(f"pos_ids:      {pos_ids.shape}")  # (8192, 3)
     print(f"Field indices:")
     for name, (s, e) in field_indices.items():
         print(f"  {name:15s}: [{s}, {e})  ({e - s} tokens)")
