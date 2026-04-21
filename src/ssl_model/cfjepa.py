@@ -184,7 +184,11 @@ class CFJEPA(nn.Module):
         # SIGReg on the full target pass: full_target_out sees all tokens in a
         # single coherent attention context and is the learning target, making
         # it the right place to enforce Gaussian-distributed representations.
-        l_sigreg = sigreg_loss(full_target_out)
+        # Subsample tokens to keep the O(N^2) pairwise term in sigreg_loss
+        # within memory bounds (1024 tokens → ~1.6 GB for B=6, sketch_dim=64).
+        n_sigreg = min(1024, N_total)
+        idx = torch.randperm(N_total, device=device)[:n_sigreg]
+        l_sigreg = sigreg_loss(full_target_out[:, idx, :])
 
         total_loss = (
             self.lambda_within  * l_within
