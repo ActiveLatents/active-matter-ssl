@@ -4,8 +4,8 @@
 Loss functions for Channel-Factored JEPA.
 
 Three components:
-  1. Prediction loss (smooth L1): measures how well the predictor
-     reconstructs the encoder's representations at masked positions.
+  1. Prediction loss (normalized MSE / alignment): cosine alignment between
+     L2-normalized predictions and targets. Prevents mean-predictor collapse.
   2. SIGReg (variance + covariance regularization): prevents representation
      collapse by ensuring each feature dimension has high variance and
      low correlation with other dimensions.
@@ -21,16 +21,22 @@ import torch.nn.functional as F
 
 def prediction_loss(predictions, targets):
     """
-    MSE loss between predicted and target representations.
+    Normalized MSE (alignment loss) between predicted and target representations.
+
+    Both are L2-normalized before MSE, equivalent to 2 - 2*cosine_similarity.
+    Prevents mean-predictor collapse: predicting zero (mean of zero-mean
+    SIGReg targets) is undefined after normalization, forcing non-trivial
+    directional predictions.
 
     Args:
         predictions: (B, N_mask, D) -- predictor output at masked positions
         targets:     (B, N_mask, D) -- encoder output at masked positions
-                     (computed by running full input through encoder, detached)
 
     Returns:
-        scalar loss
+        scalar loss in [0, 4]
     """
+    predictions = F.normalize(predictions, dim=-1)
+    targets = F.normalize(targets, dim=-1)
     return F.mse_loss(predictions, targets)
 
 

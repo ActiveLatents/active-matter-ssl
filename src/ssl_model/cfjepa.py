@@ -23,6 +23,7 @@ import copy
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .patch_embed import ChannelFactoredPatchEmbed
 from .encoder import ViTEncoder
@@ -160,12 +161,13 @@ class CFJEPA(nn.Module):
         device = next(self.parameters()).device
 
         # 1. Online patch embedding
-        all_tokens, field_indices, _ = self.patch_embed(field_dict)
+        all_tokens, field_indices, grid_shape = self.patch_embed(field_dict)
         B, N_total, D = all_tokens.shape
 
-        # 2. Generate masks
+        # 2. Generate spatiotemporal block masks (Fix 1)
         within_masks, cross_masks = generate_masks(
             field_indices,
+            grid_shape=grid_shape,
             within_mask_ratio=self.within_mask_ratio,
             device=device,
         )
@@ -188,7 +190,12 @@ class CFJEPA(nn.Module):
             masked_indices=w_mask_ids,
             total_tokens=N_total,
         )
-        w_targets = self._gather_tokens(full_target_out, w_mask_ids)
+        # Fix 4: normalize targets to unit sphere before loss.
+        # Prevents encoder from collapsing to small-magnitude outputs that
+        # trivially minimize MSE; predictor must match directions, not scales.
+        w_targets = F.normalize(
+            self._gather_tokens(full_target_out, w_mask_ids).float(), dim=-1
+        )
 
         # ── Cross-field online pass ─────────────────────────────────────
         c_vis_ids  = batch_mask_indices(cross_masks["visible_ids"], B)
@@ -203,16 +210,20 @@ class CFJEPA(nn.Module):
             masked_indices=c_mask_ids,
             total_tokens=N_total,
         )
-        c_targets = self._gather_tokens(full_target_out, c_mask_ids)
+        c_targets = F.normalize(
+            self._gather_tokens(full_target_out, c_mask_ids).float(), dim=-1
+        )
 
         # ── Losses ─────────────────────────────────────────────────────
         l_within = prediction_loss(w_preds, w_targets)
         l_cross  = prediction_loss(c_preds, c_targets)
 
-        # SIGReg on combined online outputs — prevents online encoder collapse
-        online_out = torch.cat([w_encoder_out, c_encoder_out], dim=1)
+        # Fix 3: SIGReg on mean-pooled per-sample representations (B, D).
+        # Pooling first forces diverse per-sample summaries rather than
+        # trivially satisfying token-level variance within each sample.
+        online_pooled = torch.cat([w_encoder_out, c_encoder_out], dim=1).mean(dim=1)
         l_sigreg, var_l, cov_l = sigreg_loss(
-            online_out,
+            online_pooled,
             var_weight=self.sigreg_var_weight,
             cov_weight=self.sigreg_cov_weight,
         )

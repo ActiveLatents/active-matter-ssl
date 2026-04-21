@@ -4,58 +4,83 @@
 Masking strategies for Channel-Factored JEPA.
 
 Two complementary masking types:
-  1. Within-field:  For each field group, randomly mask a fraction of its
-                    tokens. The predictor reconstructs them from unmasked
-                    tokens of the SAME group.
+  1. Within-field:  For each field group, mask a contiguous spatiotemporal
+                    block of its tokens (V-JEPA style). The predictor
+                    reconstructs them from unmasked tokens of the SAME group.
   2. Cross-field:   Mask ALL tokens of one entire field group. The predictor
                     reconstructs them from ALL tokens of the other groups.
 
 Both produce (visible_indices, masked_indices) pairs that the predictor
 uses to know which tokens to predict.
-"""
 
-import random
+Block masking (vs. random token masking) forces the model to predict across
+space and time rather than interpolating from nearby unmasked neighbors.
+"""
 
 import torch
 
 
-def within_field_mask(field_indices, mask_ratio=0.75, device="cpu"):
+def within_field_block_mask(field_indices, grid_shape, mask_ratio=0.75, device="cpu"):
     """
-    For each field group, randomly mask `mask_ratio` fraction of its tokens.
+    For each field group, mask a single contiguous spatiotemporal block.
+
+    Block dimensions are sampled so the block covers approximately
+    `mask_ratio` of the group's tokens. The temporal and spatial axes
+    are scaled independently with slight randomness so the model sees
+    varied block shapes across training steps.
+
+    Token layout (per group): flat index = t * n_h * n_w + h * n_w + w,
+    matching the (n_t, n_h, n_w) raster order from TubeletEmbedding.
 
     Args:
         field_indices: dict mapping group name to (start_idx, end_idx)
-        mask_ratio:    fraction of tokens to mask per group
+        grid_shape:    (n_t, n_h, n_w) tubelet grid dimensions
+        mask_ratio:    target fraction of tokens to mask per group
         device:        torch device
 
     Returns:
         visible_ids: (N_visible,) -- global token indices that are visible
         masked_ids:  (N_masked,)  -- global token indices that are masked
     """
+    n_t, n_h, n_w = grid_shape
     all_visible = []
     all_masked = []
 
     for name, (start, end) in field_indices.items():
-        n_tokens = end - start
-        n_mask = int(n_tokens * mask_ratio)
-        n_keep = n_tokens - n_mask
+        # Sample temporal coverage with slight randomness around mask_ratio
+        t_ratio = torch.empty(1, device=device).uniform_(
+            max(0.5, mask_ratio - 0.15), min(1.0, mask_ratio + 0.15)
+        ).item()
 
-        # Random permutation within this group's token range
-        perm = torch.randperm(n_tokens, device=device)
+        # Spatial coverage chosen so t_ratio * h_ratio * w_ratio ≈ mask_ratio
+        spatial_ratio = (mask_ratio / max(t_ratio, 1e-6)) ** 0.5
+        spatial_ratio = min(spatial_ratio, 1.0)
+
+        bt = max(1, min(n_t, round(n_t * t_ratio)))
+        bh = max(1, min(n_h, round(n_h * spatial_ratio)))
+        bw = max(1, min(n_w, round(n_w * spatial_ratio)))
+
+        # Random block origin (uniform over valid positions)
+        t0 = torch.randint(0, max(1, n_t - bt + 1), (1,), device=device).item()
+        h0 = torch.randint(0, max(1, n_h - bh + 1), (1,), device=device).item()
+        w0 = torch.randint(0, max(1, n_w - bw + 1), (1,), device=device).item()
+
+        # Vectorized 3D block mask via broadcasting
+        t_in = (torch.arange(n_t, device=device) >= t0) & \
+               (torch.arange(n_t, device=device) < t0 + bt)
+        h_in = (torch.arange(n_h, device=device) >= h0) & \
+               (torch.arange(n_h, device=device) < h0 + bh)
+        w_in = (torch.arange(n_w, device=device) >= w0) & \
+               (torch.arange(n_w, device=device) < w0 + bw)
+
+        block_mask = (t_in[:, None, None] & h_in[None, :, None] & w_in[None, None, :]).reshape(-1)
+
         group_indices = torch.arange(start, end, device=device)
+        all_visible.append(group_indices[~block_mask])
+        all_masked.append(group_indices[block_mask])
 
-        keep_ids = group_indices[perm[:n_keep]]
-        mask_ids = group_indices[perm[n_keep:]]
-
-        all_visible.append(keep_ids)
-        all_masked.append(mask_ids)
-
-    visible_ids = torch.cat(all_visible)
-    masked_ids = torch.cat(all_masked)
-
-    # Sort for deterministic ordering
-    visible_ids = visible_ids.sort().values
-    masked_ids = masked_ids.sort().values
+    visible_ids = torch.cat(all_visible).sort().values
+    masked_ids = torch.cat(all_masked).sort().values
 
     return visible_ids, masked_ids
 
@@ -89,7 +114,7 @@ def cross_field_mask(field_indices, target_group, device="cpu"):
     return visible_ids, masked_ids
 
 
-def generate_masks(field_indices, within_mask_ratio=0.75, device="cpu"):
+def generate_masks(field_indices, grid_shape, within_mask_ratio=0.75, device="cpu"):
     """
     Generate both within-field and cross-field masks for one training step.
 
@@ -97,16 +122,17 @@ def generate_masks(field_indices, within_mask_ratio=0.75, device="cpu"):
 
     Args:
         field_indices:      dict mapping group name to (start_idx, end_idx)
-        within_mask_ratio:  fraction to mask for within-field
+        grid_shape:         (n_t, n_h, n_w) tubelet grid dimensions
+        within_mask_ratio:  target fraction to mask for within-field block
         device:             torch device
 
     Returns:
         within_masks: dict with keys "visible_ids" and "masked_ids"
         cross_masks:  dict with keys "visible_ids", "masked_ids", "target_group"
     """
-    # Within-field: mask a fraction from each group
-    w_visible, w_masked = within_field_mask(
-        field_indices, mask_ratio=within_mask_ratio, device=device,
+    # Within-field: mask a contiguous spatiotemporal block in each group
+    w_visible, w_masked = within_field_block_mask(
+        field_indices, grid_shape, mask_ratio=within_mask_ratio, device=device,
     )
 
     # Cross-field: randomly pick one group to mask entirely
@@ -147,17 +173,17 @@ def batch_mask_indices(mask_ids, batch_size):
 # ── Quick test ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Simulate field indices from ChannelFactoredPatchEmbed
-    # Each group has 2048 tokens (8 temporal x 16 x 16 spatial)
+    # n_t=8, n_h=16, n_w=16 → 2048 tokens per group
     field_indices = {
         "concentration": (0, 2048),
         "velocity":      (2048, 4096),
         "orientation":   (4096, 6144),
         "strain_rate":   (6144, 8192),
     }
+    grid_shape = (8, 16, 16)
 
     within_masks, cross_masks = generate_masks(
-        field_indices, within_mask_ratio=0.75,
+        field_indices, grid_shape, within_mask_ratio=0.75,
     )
 
     total = 8192
