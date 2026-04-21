@@ -294,8 +294,6 @@ def train(args):
                     "train/loss_within": loss_dict["loss_within"].item(),
                     "train/loss_cross": loss_dict["loss_cross"].item(),
                     "train/sigreg_total": loss_dict["sigreg_total"].item(),
-                    "train/sigreg_global_var": loss_dict["sigreg_global_var"].item(),
-                    "train/sigreg_global_cov": loss_dict["sigreg_global_cov"].item(),
                     "train/lr": lr,
                     "train/ema_decay": ema_decay,
                     "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,

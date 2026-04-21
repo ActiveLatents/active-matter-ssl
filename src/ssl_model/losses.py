@@ -1,19 +1,20 @@
-# src/model/losses.py
+# src/ssl_model/losses.py
 
 """
 Loss functions for Channel-Factored JEPA.
 
-Three components:
-  1. Prediction loss (normalized MSE / alignment): cosine alignment between
-     L2-normalized predictions and targets. Prevents mean-predictor collapse.
-  2. SIGReg (variance + covariance regularization): prevents representation
-     collapse by ensuring each feature dimension has high variance and
-     low correlation with other dimensions.
-  3. Combined loss: weighted sum of prediction losses and SIGReg.
+Two components:
+  1. Prediction loss (normalized MSE): cosine alignment between L2-normalized
+     predictions and targets. Prevents mean-predictor collapse.
+  2. SIGReg (Sketched Isotropic Gaussian Regularization): forces the empirical
+     distribution of token representations to match a standard Gaussian by
+     comparing Empirical Characteristic Functions (ECF). Unlike VICReg/variance
+     regularization (which only constrains 2nd moments), ECF matching constrains
+     ALL moments — a mixture of B point masses (per-sample collapse mode) looks
+     nothing like a Gaussian and is strongly penalized.
 """
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -24,13 +25,12 @@ def prediction_loss(predictions, targets):
     Normalized MSE (alignment loss) between predicted and target representations.
 
     Both are L2-normalized before MSE, equivalent to 2 - 2*cosine_similarity.
-    Prevents mean-predictor collapse: predicting zero (mean of zero-mean
-    SIGReg targets) is undefined after normalization, forcing non-trivial
-    directional predictions.
+    Targets should already be L2-normalized (pre-normalized in cfjepa.py);
+    the normalization here is applied to predictions only (idempotent on targets).
 
     Args:
         predictions: (B, N_mask, D) -- predictor output at masked positions
-        targets:     (B, N_mask, D) -- encoder output at masked positions
+        targets:     (B, N_mask, D) -- unit-normalized encoder targets
 
     Returns:
         scalar loss in [0, 4]
@@ -40,210 +40,92 @@ def prediction_loss(predictions, targets):
     return F.mse_loss(predictions, targets)
 
 
-# ── SIGReg ──────────────────────────────────────────────────────────────────
+# ── SIGReg ───────────────────────────────────────────────────────────────────
 
-def sigreg_loss(embeddings, var_weight=1.0, cov_weight=1.0, var_target=1.0):
+def sigreg_loss(x, sketch_dim=64, n_integration=17):
     """
-    SIGReg: variance + covariance regularization on representations.
+    Sketched Isotropic Gaussian Regularization (SIGReg).
 
-    Variance term: pushes the standard deviation of each feature dimension
-    toward `var_target` using a hinge loss. Prevents dimension collapse.
+    Forces the empirical distribution of x to match a standard Gaussian by
+    comparing their Empirical Characteristic Functions (ECF) via random
+    projection. Based on LeJEPA Algorithm 1 (https://github.com/kreasof-ai/sigreg).
 
-    Covariance term: pushes off-diagonal entries of the feature covariance
-    matrix toward zero. Prevents redundancy between dimensions.
+    Algorithm:
+      1. Project x → sketch_dim via a random unit-column matrix A
+      2. Compute ECF(t) = E[exp(it * x@A)] for t in [-5, 5]
+      3. Compare to Gaussian CF: G(t) = exp(-t²/2)
+      4. Loss = integral |ECF(t) - G(t)|² * G(t) dt  (Gaussian-weighted L2)
+
+    The Gaussian weighting focuses the comparison on the region where the
+    Gaussian CF has support (|t| < 3), avoiding noise at the tails.
+
+    Why ECF > VICReg:
+      - VICReg enforces variance ≈ 1 and low covariance (2nd moments only).
+        A mixture of B point masses (B=6 per-sample collapse) can satisfy this
+        if the B directions are diverse.
+      - ECF matching enforces ALL moments. A mixture of 6 Dirac deltas has
+        ECF = (1/6) Σ exp(it·x_i), which is never Gaussian-shaped.
 
     Args:
-        embeddings: (B, D) -- pooled representations for a batch
-                    or (B, N, D) which will be reshaped to (B*N, D)
-        var_weight: weight for variance term
-        cov_weight: weight for covariance term
-        var_target: target standard deviation per dimension
+        x:              (N, D) or (B, N, D) — flattened to (B*N, D) if 3D
+        sketch_dim:     random projection dimension (trade-off: coverage vs cost)
+        n_integration:  number of quadrature points for trapezoid integration
 
     Returns:
-        total_loss: scalar
-        var_loss:   scalar (for logging)
-        cov_loss:   scalar (for logging)
+        scalar loss (≥ 0; equals 0 when x is exactly standard Gaussian)
     """
-    # Handle token-level representations by flattening
-    if embeddings.dim() == 3:
-        embeddings = embeddings.reshape(-1, embeddings.shape[-1])
+    if x.dim() == 3:
+        x = x.reshape(-1, x.shape[-1])
 
-    # Cast to float32: covariance matmul in bfloat16 loses too much precision
-    embeddings = embeddings.float()
+    # Cast to float32: complex exponential loses precision in bfloat16
+    x = x.float()
+    N, C = x.shape
 
-    B, D = embeddings.shape
+    # 1. Random unit-column projection: C → sketch_dim
+    A = torch.randn(C, sketch_dim, device=x.device)
+    A = A / (A.norm(p=2, dim=0, keepdim=True) + 1e-6)
 
-    # Center the embeddings
-    embeddings = embeddings - embeddings.mean(dim=0, keepdim=True)
+    # 2. Integration points and theoretical Gaussian CF
+    t = torch.linspace(-5, 5, n_integration, device=x.device)
+    gauss_cf = torch.exp(-0.5 * t ** 2)  # (T,)
 
-    # Variance loss: hinge on per-dimension std
-    std = embeddings.std(dim=0)
-    var_loss = F.relu(var_target - std).mean()
+    # 3. Empirical CF: E_N[exp(it * x@A)]
+    proj = x @ A                                            # (N, sketch_dim)
+    args = proj.unsqueeze(2) * t.view(1, 1, -1)            # (N, sketch_dim, T)
+    ecf = torch.exp(1j * args).mean(dim=0)                 # (sketch_dim, T), complex
 
-    # Covariance loss: penalize off-diagonal correlations
-    cov = (embeddings.T @ embeddings) / (B - 1)  # (D, D)
+    # 4. Gaussian-weighted L2 distance, integrated via trapezoid rule
+    diff_sq = (ecf - gauss_cf.unsqueeze(0)).abs().square() # (sketch_dim, T)
+    err = diff_sq * gauss_cf.unsqueeze(0)                  # downweight tails
+    loss = torch.trapezoid(err, t, dim=1)                  # (sketch_dim,)
 
-    # Zero out diagonal (we only penalize off-diagonal)
-    off_diag = cov - torch.diag(cov.diag())
-    cov_loss = (off_diag ** 2).sum() / D
-
-    total = var_weight * var_loss + cov_weight * cov_loss
-
-    return total, var_loss.detach(), cov_loss.detach()
-
-
-def sigreg_per_group(encoder_output, field_indices, var_weight=1.0, cov_weight=1.0):
-    """
-    Apply SIGReg separately to each field group's tokens, plus globally.
-
-    This ensures that each field group individually uses its representation
-    space well, not just the overall concatenation.
-
-    Args:
-        encoder_output: (B, N_total, D) -- full encoder output (all groups)
-        field_indices:  dict mapping group name to (start_idx, end_idx)
-        var_weight:     weight for variance term
-        cov_weight:     weight for covariance term
-
-    Returns:
-        total_loss: scalar
-        loss_dict:  dict with per-group and global losses for logging
-    """
-    total = 0.0
-    loss_dict = {}
-
-    # Per-group SIGReg
-    for name, (start, end) in field_indices.items():
-        group_tokens = encoder_output[:, start:end, :]  # (B, N_group, D)
-        group_loss, var_l, cov_l = sigreg_loss(
-            group_tokens, var_weight=var_weight, cov_weight=cov_weight,
-        )
-        total = total + group_loss
-        loss_dict[f"sigreg_{name}_var"] = var_l
-        loss_dict[f"sigreg_{name}_cov"] = cov_l
-
-    # Global SIGReg on all tokens
-    global_loss, var_l, cov_l = sigreg_loss(
-        encoder_output, var_weight=var_weight, cov_weight=cov_weight,
-    )
-    total = total + global_loss
-    loss_dict["sigreg_global_var"] = var_l
-    loss_dict["sigreg_global_cov"] = cov_l
-
-    loss_dict["sigreg_total"] = total.detach()
-
-    return total, loss_dict
+    return loss.mean()
 
 
-# ── Combined loss ───────────────────────────────────────────────────────────
-
-class CFJEPALoss(nn.Module):
-    """
-    Combined loss for Channel-Factored JEPA training.
-
-    L_total = lambda_within * L_within
-            + lambda_cross  * L_cross
-            + lambda_sigreg * L_sigreg
-    """
-
-    def __init__(
-        self,
-        lambda_within=1.0,
-        lambda_cross=1.0,
-        lambda_sigreg=0.1,
-        sigreg_var_weight=1.0,
-        sigreg_cov_weight=1.0,
-    ):
-        super().__init__()
-        self.lambda_within = lambda_within
-        self.lambda_cross = lambda_cross
-        self.lambda_sigreg = lambda_sigreg
-        self.sigreg_var_weight = sigreg_var_weight
-        self.sigreg_cov_weight = sigreg_cov_weight
-
-    def forward(
-        self,
-        within_preds,
-        within_targets,
-        cross_preds,
-        cross_targets,
-        encoder_output,
-        field_indices,
-    ):
-        """
-        Args:
-            within_preds:    (B, N_within_mask, D) -- predictor output for within-field
-            within_targets:  (B, N_within_mask, D) -- encoder targets for within-field
-            cross_preds:     (B, N_cross_mask, D) -- predictor output for cross-field
-            cross_targets:   (B, N_cross_mask, D) -- encoder targets for cross-field
-            encoder_output:  (B, N_total, D) -- full encoder output for SIGReg
-            field_indices:   dict mapping group name to (start, end)
-
-        Returns:
-            total_loss: scalar
-            loss_dict:  dict with all loss components for logging
-        """
-        # Prediction losses
-        l_within = prediction_loss(within_preds, within_targets)
-        l_cross = prediction_loss(cross_preds, cross_targets)
-
-        # SIGReg (per-group + global)
-        l_sigreg, sigreg_dict = sigreg_per_group(
-            encoder_output, field_indices,
-            var_weight=self.sigreg_var_weight,
-            cov_weight=self.sigreg_cov_weight,
-        )
-
-        # Weighted sum
-        total = (
-            self.lambda_within * l_within
-            + self.lambda_cross * l_cross
-            + self.lambda_sigreg * l_sigreg
-        )
-
-        # Logging dict
-        loss_dict = {
-            "loss_total": total.detach(),
-            "loss_within": l_within.detach(),
-            "loss_cross": l_cross.detach(),
-            **sigreg_dict,
-        }
-
-        return total, loss_dict
-
-
-# ── Quick test ──────────────────────────────────────────────────────────────
+# ── Quick test ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import torch
+
     B, D = 4, 384
 
-    # Test SIGReg
-    emb = torch.randn(B, 100, D)
-    loss, var_l, cov_l = sigreg_loss(emb)
-    print(f"SIGReg: total={loss:.4f}, var={var_l:.4f}, cov={cov_l:.4f}")
+    # Gaussian input → loss should be near 0
+    x_gauss = torch.randn(B, 100, D)
+    loss_gauss = sigreg_loss(x_gauss)
+    print(f"SIGReg (Gaussian input):  {loss_gauss:.6f}  (expect ~0)")
 
-    # Test prediction loss
+    # Collapsed input (all tokens same per sample) → loss should be high
+    x_collapsed = torch.zeros(B, 100, D)
+    for b in range(B):
+        x_collapsed[b] = torch.randn(1, D).expand(100, D)
+    loss_collapsed = sigreg_loss(x_collapsed)
+    print(f"SIGReg (collapsed input): {loss_collapsed:.6f}  (expect >> 0)")
+
+    # Prediction loss
     pred = torch.randn(B, 50, D)
-    tgt = torch.randn(B, 50, D)
+    tgt  = F.normalize(torch.randn(B, 50, D), dim=-1)
     ploss = prediction_loss(pred, tgt)
-    print(f"Prediction loss: {ploss:.4f}")
+    print(f"Prediction loss (random): {ploss:.4f}  (expect ~2.0)")
 
-    # Test combined loss
-    criterion = CFJEPALoss()
-    field_indices = {
-        "concentration": (0, 25),
-        "velocity": (25, 50),
-        "orientation": (50, 75),
-        "strain_rate": (75, 100),
-    }
-    total, loss_dict = criterion(
-        within_preds=torch.randn(B, 75, D),
-        within_targets=torch.randn(B, 75, D),
-        cross_preds=torch.randn(B, 25, D),
-        cross_targets=torch.randn(B, 25, D),
-        encoder_output=torch.randn(B, 100, D),
-        field_indices=field_indices,
-    )
-    print(f"\nCombined loss: {total:.4f}")
-    for k, v in loss_dict.items():
-        print(f"  {k}: {v:.4f}")
+    pred_perfect = tgt.clone()
+    print(f"Prediction loss (perfect): {prediction_loss(pred_perfect, tgt):.6f}  (expect 0)")

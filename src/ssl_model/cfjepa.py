@@ -59,8 +59,6 @@ class CFJEPA(nn.Module):
         lambda_within=1.0,
         lambda_cross=1.0,
         lambda_sigreg=0.1,
-        sigreg_var_weight=1.0,
-        sigreg_cov_weight=1.0,
     ):
         super().__init__()
 
@@ -68,8 +66,6 @@ class CFJEPA(nn.Module):
         self.lambda_within = lambda_within
         self.lambda_cross = lambda_cross
         self.lambda_sigreg = lambda_sigreg
-        self.sigreg_var_weight = sigreg_var_weight
-        self.sigreg_cov_weight = sigreg_cov_weight
 
         # ── Online modules (receive gradients) ──────────────────────────
         self.patch_embed = ChannelFactoredPatchEmbed(
@@ -218,17 +214,13 @@ class CFJEPA(nn.Module):
         l_within = prediction_loss(w_preds, w_targets)
         l_cross  = prediction_loss(c_preds, c_targets)
 
-        # SIGReg on all online encoder tokens (B×N_visible, D).
-        # Token-level gives ~3000 samples per step → reliable variance estimates.
-        # Strong SIGReg here forces diverse token representations in the online
-        # encoder, which propagates to the target encoder via EMA, making the
-        # prediction task non-trivial.
+        # SIGReg (ECF-based): forces the distribution of all online token
+        # representations to match a Gaussian. Applied to (B*N_visible, D)
+        # so the full marginal is regularized — a mixture of B point masses
+        # (per-sample constant collapse) has a non-Gaussian ECF and is
+        # strongly penalized regardless of batch size.
         online_out = torch.cat([w_encoder_out, c_encoder_out], dim=1)
-        l_sigreg, var_l, cov_l = sigreg_loss(
-            online_out,
-            var_weight=self.sigreg_var_weight,
-            cov_weight=self.sigreg_cov_weight,
-        )
+        l_sigreg = sigreg_loss(online_out)
 
         total_loss = (
             self.lambda_within  * l_within
@@ -237,12 +229,10 @@ class CFJEPA(nn.Module):
         )
 
         loss_dict = {
-            "loss_total":        total_loss.detach(),
-            "loss_within":       l_within.detach(),
-            "loss_cross":        l_cross.detach(),
-            "sigreg_total":      l_sigreg.detach(),
-            "sigreg_global_var": var_l,
-            "sigreg_global_cov": cov_l,
+            "loss_total":   total_loss.detach(),
+            "loss_within":  l_within.detach(),
+            "loss_cross":   l_cross.detach(),
+            "sigreg_total": l_sigreg.detach(),
         }
 
         return total_loss, loss_dict
