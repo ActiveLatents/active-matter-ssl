@@ -43,11 +43,9 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --weight_decay 0.05 \
             --warmup_epochs 10 \
             --grad_clip 1.0 \
-            --ema_start 0.996 \
-            --ema_end 0.9998 \
             --log_every 50 \
             --val_every 5 \
             --wandb_project active-matter-ssl \
-            --run_name cfjepa-v5_sigreg_ecf \
+            --run_name cfjepa-v6_no_ema_only_sigreg \
             --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl
         "

@@ -1,25 +1,23 @@
 # src/ssl_model/cfjepa.py
 
 """
-Channel-Factored JEPA (CF-JEPA) with EMA target encoder.
+Channel-Factored JEPA (CF-JEPA).
 
-Training flow (I-JEPA style):
-  1. Online patch embedding → tokens for visible context
-  2. Target patch embedding (EMA) → full tokens → target encoder (EMA) → targets
-  3. Generate within-field and cross-field masks
-  4. Online encoder processes VISIBLE tokens only (2 passes, with gradients)
+Training flow:
+  1. Patch embedding → all tokens
+  2. Encoder(all tokens) → prediction targets  (no stop-gradient, no EMA)
+  3. Generate within-field and cross-field spatiotemporal block masks
+  4. Two encoder passes on VISIBLE tokens
   5. Predictor reconstructs masked target representations
-  6. Loss = prediction loss + SIGReg on online encoder outputs
+  6. Loss = prediction loss (normalized MSE) + per-sample SIGReg
 
-The EMA target encoder provides stable, non-collapsing targets.
-update_ema() must be called after every optimizer step.
+SIGReg is the sole anti-collapse mechanism. It forces each sample's token
+representations to be Gaussian-distributed, making collapse impossible
+regardless of how gradients flow — no stop-gradient or EMA heuristics needed.
 
 Evaluation flow (linear probe / kNN):
-  1. Target encoder encodes ALL tokens (most stable representations)
-  2. Pool to a single representation vector
+  Encoder encodes ALL tokens, mean-pool to a single representation vector.
 """
-
-import copy
 
 import torch
 import torch.nn as nn
@@ -67,7 +65,6 @@ class CFJEPA(nn.Module):
         self.lambda_cross = lambda_cross
         self.lambda_sigreg = lambda_sigreg
 
-        # ── Online modules (receive gradients) ──────────────────────────
         self.patch_embed = ChannelFactoredPatchEmbed(
             embed_dim=embed_dim,
             tube_t=tube_t,
@@ -94,36 +91,8 @@ class CFJEPA(nn.Module):
             mlp_ratio=mlp_ratio,
         )
 
-        # ── Target modules (EMA copy, no gradients) ─────────────────────
-        self.target_patch_embed = copy.deepcopy(self.patch_embed)
-        self.target_encoder = copy.deepcopy(self.encoder)
-
-        for p in self.target_patch_embed.parameters():
-            p.requires_grad_(False)
-        for p in self.target_encoder.parameters():
-            p.requires_grad_(False)
-
-    @torch.no_grad()
-    def update_ema(self, decay: float):
-        """
-        Update target encoder via exponential moving average of online encoder.
-        Call after every optimizer.step().
-
-        target = decay * target + (1 - decay) * online
-        """
-        for online, target in zip(
-            self.patch_embed.parameters(), self.target_patch_embed.parameters()
-        ):
-            target.data.mul_(decay).add_(online.data, alpha=1.0 - decay)
-
-        for online, target in zip(
-            self.encoder.parameters(), self.target_encoder.parameters()
-        ):
-            target.data.mul_(decay).add_(online.data, alpha=1.0 - decay)
-
     def _gather_tokens(self, tokens, indices):
         """
-        Gather tokens at given indices.
         tokens:  (B, N, D)
         indices: (B, K)
         returns: (B, K, D)
@@ -134,17 +103,12 @@ class CFJEPA(nn.Module):
 
     def forward_ssl(self, field_dict):
         """
-        SSL training forward pass with EMA target encoder.
+        SSL training forward pass.
 
-        Two online encoder passes (with gradients):
-          B. Within-field visible tokens
-          C. Cross-field visible tokens
-
-        One target encoder pass (no gradient):
-          T. All tokens → stable prediction targets
-
-        SIGReg is applied to combined online encoder outputs to prevent
-        online encoder collapse.
+        The encoder runs on all tokens to produce prediction targets, and also
+        on visible-only subsets for the online passes. Gradients flow freely
+        through all paths. SIGReg on the online encoder outputs is the only
+        anti-collapse mechanism.
 
         Args:
             field_dict: dict with keys (concentration, velocity, orientation,
@@ -156,11 +120,11 @@ class CFJEPA(nn.Module):
         """
         device = next(self.parameters()).device
 
-        # 1. Online patch embedding
+        # 1. Patch embedding
         all_tokens, field_indices, grid_shape = self.patch_embed(field_dict)
         B, N_total, D = all_tokens.shape
 
-        # 2. Generate spatiotemporal block masks (Fix 1)
+        # 2. Generate spatiotemporal block masks
         within_masks, cross_masks = generate_masks(
             field_indices,
             grid_shape=grid_shape,
@@ -168,10 +132,9 @@ class CFJEPA(nn.Module):
             device=device,
         )
 
-        # 3. Target pass: EMA encoder on ALL tokens (no gradient)
-        with torch.no_grad():
-            target_tokens, _, _ = self.target_patch_embed(field_dict)
-            full_target_out = self.target_encoder(target_tokens)
+        # 3. Target pass: full encoder on all tokens, no stop-gradient.
+        # SIGReg is the sole anti-collapse mechanism — no heuristics needed.
+        full_target_out = self.encoder(all_tokens)
 
         # ── Within-field online pass ────────────────────────────────────
         w_vis_ids  = batch_mask_indices(within_masks["visible_ids"], B)
@@ -186,9 +149,6 @@ class CFJEPA(nn.Module):
             masked_indices=w_mask_ids,
             total_tokens=N_total,
         )
-        # Fix 4: normalize targets to unit sphere before loss.
-        # Prevents encoder from collapsing to small-magnitude outputs that
-        # trivially minimize MSE; predictor must match directions, not scales.
         w_targets = F.normalize(
             self._gather_tokens(full_target_out, w_mask_ids).float(), dim=-1
         )
@@ -214,12 +174,10 @@ class CFJEPA(nn.Module):
         l_within = prediction_loss(w_preds, w_targets)
         l_cross  = prediction_loss(c_preds, c_targets)
 
-        # SIGReg (ECF-based): forces the distribution of all online token
-        # representations to match a Gaussian. Applied to (B*N_visible, D)
-        # so the full marginal is regularized — a mixture of B point masses
-        # (per-sample constant collapse) has a non-Gaussian ECF and is
-        # strongly penalized regardless of batch size.
-        online_out = torch.cat([w_encoder_out, c_encoder_out], dim=1)
+        # Per-sample SIGReg: forces each sample's token representations to be
+        # Gaussian-distributed across the token dimension. Prevents the encoder
+        # from mapping all tokens within a sample to the same direction.
+        online_out = torch.cat([w_encoder_out, c_encoder_out], dim=1)  # (B, N, D)
         l_sigreg = sigreg_loss(online_out)
 
         total_loss = (
@@ -241,8 +199,6 @@ class CFJEPA(nn.Module):
     def encode(self, field_dict, pool="mean"):
         """
         Extract representations for evaluation (linear probe / kNN).
-        Uses the target encoder — its representations are more stable
-        than the online encoder since it is updated via EMA.
 
         Args:
             field_dict: dict with field group tensors
@@ -251,8 +207,8 @@ class CFJEPA(nn.Module):
         Returns:
             features: (B, embed_dim)
         """
-        target_tokens, _, _ = self.target_patch_embed(field_dict)
-        encoder_out = self.target_encoder(target_tokens)
+        all_tokens, _, _ = self.patch_embed(field_dict)
+        encoder_out = self.encoder(all_tokens)
 
         if pool == "mean":
             return encoder_out.mean(dim=1)
@@ -264,40 +220,27 @@ class CFJEPA(nn.Module):
         total     = sum(p.numel() for p in self.parameters())
 
         components = {
-            "patch_embed (online)":  self.patch_embed,
-            "encoder (online)":      self.encoder,
-            "predictor":             self.predictor,
-            "patch_embed (target)":  self.target_patch_embed,
-            "encoder (target)":      self.target_encoder,
+            "patch_embed": self.patch_embed,
+            "encoder":     self.encoder,
+            "predictor":   self.predictor,
         }
-        counts = {}
         for name, module in components.items():
             n = sum(p.numel() for p in module.parameters())
-            print(f"  {name:25s}: {n / 1e6:.2f}M")
-            counts[name] = n
+            print(f"  {name:12s}: {n / 1e6:.2f}M")
 
-        print(f"  {'trainable':25s}: {trainable / 1e6:.2f}M")
-        print(f"  {'total':25s}: {total / 1e6:.2f}M")
-        counts["trainable"] = trainable
-        counts["total"] = total
-        return counts
+        print(f"  {'trainable':12s}: {trainable / 1e6:.2f}M")
+        print(f"  {'total':12s}: {total / 1e6:.2f}M")
+        return {"trainable": trainable, "total": total}
 
 
 # ── Quick test ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     model = CFJEPA(
-        embed_dim=384,
-        tube_t=2,
-        patch_h=16,
-        patch_w=16,
-        n_frames=16,
-        spatial_size=256,
-        encoder_depth=12,
-        encoder_heads=6,
-        predictor_dim=192,
-        predictor_depth=4,
-        predictor_heads=6,
+        embed_dim=384, tube_t=2, patch_h=16, patch_w=16,
+        n_frames=16, spatial_size=256,
+        encoder_depth=12, encoder_heads=6,
+        predictor_dim=192, predictor_depth=4, predictor_heads=6,
         within_mask_ratio=0.75,
     )
 
@@ -318,10 +261,6 @@ if __name__ == "__main__":
     for k, v in loss_dict.items():
         print(f"  {k}: {v:.4f}")
 
-    # EMA update
-    model.update_ema(decay=0.996)
-    print("\nEMA update: OK")
-
-    print("\nEvaluation encode (target encoder)...")
+    print("\nEvaluation encode...")
     features = model.encode(field_dict)
     print(f"Features: {features.shape}")  # (2, 384)

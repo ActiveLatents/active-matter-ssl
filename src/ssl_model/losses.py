@@ -44,62 +44,66 @@ def prediction_loss(predictions, targets):
 
 def sigreg_loss(x, sketch_dim=64, n_integration=17):
     """
-    Sketched Isotropic Gaussian Regularization (SIGReg).
+    Per-sample Sketched Isotropic Gaussian Regularization (SIGReg).
 
-    Forces the empirical distribution of x to match a standard Gaussian by
-    comparing their Empirical Characteristic Functions (ECF) via random
-    projection. Based on LeJEPA Algorithm 1 (https://github.com/kreasof-ai/sigreg).
+    Applies ECF matching INDEPENDENTLY for each sample's N token representations,
+    then averages over the batch. This is the critical distinction from global
+    (batch-level) ECF matching.
 
-    Algorithm:
-      1. Project x → sketch_dim via a random unit-column matrix A
-      2. Compute ECF(t) = E[exp(it * x@A)] for t in [-5, 5]
+    The collapse mode we are fighting: at initialization, all N tokens within
+    sample i collapse to the same representation direction c_i. The global
+    distribution of (B*N) tokens can look Gaussian (if c_i ~ N(0,I) across
+    samples), satisfying batch-level SIGReg. But per-sample, each sample is a
+    Dirac delta with ECF = exp(it·proj(c_i)), which looks nothing like a
+    Gaussian CF = exp(-t²/2). Per-sample SIGReg directly detects and penalizes
+    this.
+
+    Algorithm (per sample b):
+      1. Project sample b's N tokens: proj_b = x_b @ A  (N, sketch_dim)
+      2. Empirical CF per sample: ECF_b(t) = mean_n[exp(it * proj_b)]  (sketch_dim, T)
       3. Compare to Gaussian CF: G(t) = exp(-t²/2)
-      4. Loss = integral |ECF(t) - G(t)|² * G(t) dt  (Gaussian-weighted L2)
-
-    The Gaussian weighting focuses the comparison on the region where the
-    Gaussian CF has support (|t| < 3), avoiding noise at the tails.
-
-    Why ECF > VICReg:
-      - VICReg enforces variance ≈ 1 and low covariance (2nd moments only).
-        A mixture of B point masses (B=6 per-sample collapse) can satisfy this
-        if the B directions are diverse.
-      - ECF matching enforces ALL moments. A mixture of 6 Dirac deltas has
-        ECF = (1/6) Σ exp(it·x_i), which is never Gaussian-shaped.
+      4. Loss_b = integral |ECF_b(t) - G(t)|² * G(t) dt
+      5. Return mean over B samples
 
     Args:
-        x:              (N, D) or (B, N, D) — flattened to (B*N, D) if 3D
-        sketch_dim:     random projection dimension (trade-off: coverage vs cost)
+        x:              (B, N, D) — one row of N token representations per sample.
+                        If (N, D), treated as a single sample (B=1).
+        sketch_dim:     random projection dimension
         n_integration:  number of quadrature points for trapezoid integration
 
     Returns:
-        scalar loss (≥ 0; equals 0 when x is exactly standard Gaussian)
+        scalar loss (≥ 0; equals 0 when each sample's tokens are Gaussian)
     """
-    if x.dim() == 3:
-        x = x.reshape(-1, x.shape[-1])
+    if x.dim() == 2:
+        x = x.unsqueeze(0)  # treat as B=1
+
+    B, N, D = x.shape
 
     # Cast to float32: complex exponential loses precision in bfloat16
     x = x.float()
-    N, C = x.shape
 
-    # 1. Random unit-column projection: C → sketch_dim
-    A = torch.randn(C, sketch_dim, device=x.device)
+    # 1. Shared random unit-column projection: D → sketch_dim
+    A = torch.randn(D, sketch_dim, device=x.device)
     A = A / (A.norm(p=2, dim=0, keepdim=True) + 1e-6)
 
     # 2. Integration points and theoretical Gaussian CF
-    t = torch.linspace(-5, 5, n_integration, device=x.device)
-    gauss_cf = torch.exp(-0.5 * t ** 2)  # (T,)
+    t = torch.linspace(-5, 5, n_integration, device=x.device)       # (T,)
+    gauss_cf = torch.exp(-0.5 * t ** 2)                              # (T,)
 
-    # 3. Empirical CF: E_N[exp(it * x@A)]
-    proj = x @ A                                            # (N, sketch_dim)
-    args = proj.unsqueeze(2) * t.view(1, 1, -1)            # (N, sketch_dim, T)
-    ecf = torch.exp(1j * args).mean(dim=0)                 # (sketch_dim, T), complex
+    # 3. Per-sample empirical CF
+    #    proj:  (B, N, sketch_dim)
+    #    args:  (B, N, sketch_dim, T)
+    #    ecf:   (B, sketch_dim, T)  — mean over N tokens within each sample
+    proj = x @ A
+    args = proj.unsqueeze(-1) * t.view(1, 1, 1, -1)
+    ecf  = torch.exp(1j * args).mean(dim=1)
 
-    # 4. Gaussian-weighted L2 distance, integrated via trapezoid rule
-    diff_sq = (ecf - gauss_cf.unsqueeze(0)).abs().square() # (sketch_dim, T)
-    err = diff_sq * gauss_cf.unsqueeze(0)                  # downweight tails
-    loss = torch.trapezoid(err, t, dim=1)                  # (sketch_dim,)
+    # 4. Gaussian-weighted L2, integrated via trapezoid rule
+    diff_sq = (ecf - gauss_cf.view(1, 1, -1)).abs().square()         # (B, sketch_dim, T)
+    err     = diff_sq * gauss_cf.view(1, 1, -1)
+    loss    = torch.trapezoid(err, t, dim=-1)                         # (B, sketch_dim)
 
-    return loss.mean()
+    return loss.mean()  # average over batch and sketch dimensions
 
 
 # ── Quick test ───────────────────────────────────────────────────────────────
@@ -107,25 +111,27 @@ def sigreg_loss(x, sketch_dim=64, n_integration=17):
 if __name__ == "__main__":
     import torch
 
-    B, D = 4, 384
+    B, N, D = 4, 512, 384
 
-    # Gaussian input → loss should be near 0
-    x_gauss = torch.randn(B, 100, D)
+    # Per-sample Gaussian tokens → each sample's ECF matches Gaussian → loss ≈ 0
+    x_gauss = torch.randn(B, N, D)
     loss_gauss = sigreg_loss(x_gauss)
-    print(f"SIGReg (Gaussian input):  {loss_gauss:.6f}  (expect ~0)")
+    print(f"SIGReg (per-sample Gaussian):  {loss_gauss:.6f}  (expect ~0)")
 
-    # Collapsed input (all tokens same per sample) → loss should be high
-    x_collapsed = torch.zeros(B, 100, D)
-    for b in range(B):
-        x_collapsed[b] = torch.randn(1, D).expand(100, D)
-    loss_collapsed = sigreg_loss(x_collapsed)
-    print(f"SIGReg (collapsed input): {loss_collapsed:.6f}  (expect >> 0)")
+    # Per-sample collapse: all N tokens in sample b = same direction c_b
+    # Global distribution of B*N tokens looks Gaussian (c_b ~ N(0,I))
+    # but per-sample ECF is a Dirac delta → loss should be large
+    x_collapsed = torch.stack([
+        torch.randn(1, D).expand(N, D) for _ in range(B)
+    ])
+    loss_global_ok = sigreg_loss(x_collapsed.reshape(-1, D).unsqueeze(0).squeeze(0)
+                                  .reshape(1, B * N, D))
+    loss_persample = sigreg_loss(x_collapsed)
+    print(f"SIGReg global (collapsed):     {loss_global_ok:.6f}  (may look ~0 — misses collapse)")
+    print(f"SIGReg per-sample (collapsed): {loss_persample:.6f}  (expect >> 0)")
 
     # Prediction loss
     pred = torch.randn(B, 50, D)
     tgt  = F.normalize(torch.randn(B, 50, D), dim=-1)
-    ploss = prediction_loss(pred, tgt)
-    print(f"Prediction loss (random): {ploss:.4f}  (expect ~2.0)")
-
-    pred_perfect = tgt.clone()
-    print(f"Prediction loss (perfect): {prediction_loss(pred_perfect, tgt):.6f}  (expect 0)")
+    print(f"Prediction loss (random):  {prediction_loss(pred, tgt):.4f}  (expect ~2.0)")
+    print(f"Prediction loss (perfect): {prediction_loss(tgt, tgt):.6f}  (expect 0)")
