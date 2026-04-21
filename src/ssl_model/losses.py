@@ -38,7 +38,7 @@ def prediction_loss(predictions, targets):
     """
     predictions = F.normalize(predictions, dim=-1)
     targets = F.normalize(targets, dim=-1)
-    return F.mse_loss(predictions, targets)
+    return F.mse_loss(predictions, targets, reduction='none').sum(dim=-1).mean()
 
 
 # ── SIGReg ───────────────────────────────────────────────────────────────────
