@@ -44,6 +44,11 @@ def set_lr(optimizer, lr):
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
+def get_ema_momentum(step, total_steps, base_ema=0.996, max_ema=1.0):
+    """Cosine schedule for EMA momentum (typically 0.996 -> 1.0)."""
+    progress = step / max(total_steps, 1)
+    return max_ema - (max_ema - base_ema) * (1 + __import__("math").cos(__import__("math").pi * progress)) / 2
+
 
 # ── Checkpoint helpers ──────────────────────────────────────────────────────
 
@@ -133,6 +138,8 @@ def train(args):
         "weight_decay": args.weight_decay,
         "warmup_epochs": args.warmup_epochs,
         "grad_clip": args.grad_clip,
+        "base_ema": args.base_ema,
+        "max_ema": args.max_ema,
     }
 
     # ── Wandb ───────────────────────────────────────────────────
@@ -190,8 +197,9 @@ def train(args):
     model.param_count()
 
     # ── Optimizer ───────────────────────────────────────────────
+    # Only optimize trainable parameters — target_encoder is frozen (EMA).
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        [p for p in model.parameters() if p.requires_grad],
         lr=args.base_lr,
         weight_decay=args.weight_decay,
         betas=(0.9, 0.95),
@@ -268,6 +276,10 @@ def train(args):
             # Step
             optimizer.step()
 
+            # EMA update of target encoder
+            ema_momentum = get_ema_momentum(global_step, total_steps, args.base_ema, args.max_ema)
+            model.update_target_encoder(ema_momentum)
+
             epoch_loss += loss.item()
             global_step += 1
 
@@ -279,6 +291,7 @@ def train(args):
                     "train/loss_cross": loss_dict["loss_cross"].item(),
                     "train/sigreg_total": loss_dict["sigreg_total"].item(),
                     "train/lr": lr,
+                    "train/ema_momentum": ema_momentum,
                     "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     "train/epoch": epoch,
                     "train/step": global_step,
@@ -373,6 +386,10 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=0.05)
     parser.add_argument("--warmup_epochs", type=int, default=10)
     parser.add_argument("--grad_clip", type=float, default=1.0)
+    parser.add_argument("--base_ema", type=float, default=0.996,
+                        help="Starting EMA momentum (cosine-scheduled up to max_ema)")
+    parser.add_argument("--max_ema", type=float, default=1.0,
+                        help="Final EMA momentum")
 
     # Logging
     parser.add_argument("--log_every", type=int, default=1)

@@ -18,7 +18,7 @@ regardless of how gradients flow — no stop-gradient or EMA heuristics needed.
 Evaluation flow (linear probe / kNN):
   Encoder encodes ALL tokens, mean-pool to a single representation vector.
 """
-
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -83,6 +83,10 @@ class CFJEPA(nn.Module):
             attn_drop_rate=attn_drop_rate,
         )
 
+        self.target_encoder = copy.deepcopy(self.encoder)
+        for param in self.target_encoder.parameters():
+            param.requires_grad = False
+
         self.predictor = Predictor(
             encoder_dim=embed_dim,
             predictor_dim=predictor_dim,
@@ -132,11 +136,12 @@ class CFJEPA(nn.Module):
             device=device,
         )
 
-        # 3. Target pass: full encoder on all tokens, no stop-gradient.
-        # SIGReg is the sole anti-collapse mechanism — no heuristics needed.
+        # 3. Target pass: full encoder on all tokens.
         # pos_ids: (N_total, 3) → expand to (B, N_total, 3) for encoder
         full_pos_ids = pos_ids.unsqueeze(0).expand(B, -1, -1)
-        full_target_out = self.encoder(all_tokens, pos_ids=full_pos_ids)
+        with torch.no_grad():
+            full_target_out = self.target_encoder(all_tokens, pos_ids=full_pos_ids)
+
 
         # ── Within-field online pass ────────────────────────────────────
         w_vis_ids  = batch_mask_indices(within_masks["visible_ids"], B)
@@ -181,14 +186,14 @@ class CFJEPA(nn.Module):
         l_within = prediction_loss(w_preds, w_targets)
         l_cross  = prediction_loss(c_preds, c_targets)
 
-        # SIGReg on the full target pass: full_target_out sees all tokens in a
-        # single coherent attention context and is the learning target, making
-        # it the right place to enforce Gaussian-distributed representations.
-        # Subsample tokens to keep the O(N^2) pairwise term in sigreg_loss
-        # within memory bounds (1024 tokens → ~1.6 GB for B=6, sketch_dim=64).
-        n_sigreg = min(1024, N_total)
-        idx = torch.randperm(N_total, device=device)[:n_sigreg]
-        l_sigreg = sigreg_loss(full_target_out[:, idx, :])
+        # SIGReg equally weighted over within-field and cross-field predictor
+        # outputs. Subsample each independently to keep O(N^2) within memory.
+        n_w = min(1024, w_preds.shape[1])
+        n_c = min(1024, c_preds.shape[1])
+        idx_w = torch.randperm(w_preds.shape[1], device=device)[:n_w]
+        idx_c = torch.randperm(c_preds.shape[1], device=device)[:n_c]
+        l_sigreg = 0.5 * sigreg_loss(w_preds[:, idx_w, :]) \
+                 + 0.5 * sigreg_loss(c_preds[:, idx_c, :])
 
         total_loss = (
             self.lambda_within  * l_within
@@ -204,6 +209,12 @@ class CFJEPA(nn.Module):
         }
 
         return total_loss, loss_dict
+
+    @torch.no_grad()
+    def update_target_encoder(self, momentum):
+        """Updates the target encoder via exponential moving average."""
+        for param, target_param in zip(self.encoder.parameters(), self.target_encoder.parameters()):
+            target_param.data.mul_(momentum).add_(param.data, alpha=1.0 - momentum)
 
     @torch.no_grad()
     def encode(self, field_dict, pool="mean"):
@@ -232,16 +243,18 @@ class CFJEPA(nn.Module):
         total     = sum(p.numel() for p in self.parameters())
 
         components = {
-            "patch_embed": self.patch_embed,
-            "encoder":     self.encoder,
-            "predictor":   self.predictor,
+            "patch_embed":    self.patch_embed,
+            "encoder":        self.encoder,
+            "predictor":      self.predictor,
+            "target_encoder": self.target_encoder,
         }
         for name, module in components.items():
             n = sum(p.numel() for p in module.parameters())
-            print(f"  {name:12s}: {n / 1e6:.2f}M")
+            frozen = " (frozen)" if not any(p.requires_grad for p in module.parameters()) else ""
+            print(f"  {name:16s}: {n / 1e6:.2f}M{frozen}")
 
-        print(f"  {'trainable':12s}: {trainable / 1e6:.2f}M")
-        print(f"  {'total':12s}: {total / 1e6:.2f}M")
+        print(f"  {'trainable':16s}: {trainable / 1e6:.2f}M")
+        print(f"  {'total':16s}: {total / 1e6:.2f}M")
         return {"trainable": trainable, "total": total}
 
 

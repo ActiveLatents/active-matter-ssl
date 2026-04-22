@@ -7,3 +7,4 @@ wandb/
 checkpoints/
 *.pt
 *.pth
+.DS_Store
