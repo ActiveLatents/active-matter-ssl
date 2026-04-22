@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=40G
-#SBATCH --time=08:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=logs/ssl_%j.out
 #SBATCH --error=logs/ssl_%j.err
 #SBATCH --requeue
@@ -24,7 +24,7 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
         python -m src.train_ssl \
             --data_dir /scratch/sk12590/dl_project_data/data \
             --n_frames 16 \
-            --train_stride 5 \
+            --train_stride 2 \
             --val_stride 1 \
             --batch_size 6 \
             --num_workers 4 \
@@ -37,7 +37,7 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --within_mask_ratio 0.75 \
             --lambda_within 1.0 \
             --lambda_cross 1.0 \
-            --lambda_sigreg 0.1 \
+            --lambda_sigreg 1.0 \
             --epochs 50 \
             --base_lr 1.5e-4 \
             --weight_decay 0.05 \
@@ -46,6 +46,6 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --log_every 50 \
             --val_every 5 \
             --wandb_project active-matter-ssl \
-            --run_name cfjepa-v6_no_ema_only_sigreg \
+            --run_name cfjepa-v7_ema_and_sigreg \
             --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl
         "
