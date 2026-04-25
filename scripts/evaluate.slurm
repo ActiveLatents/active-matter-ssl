@@ -23,7 +23,7 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
         python -m src.evaluate \
             --checkpoint /scratch/sk12590/active-matter-ssl/runs/ssl/best.pt \
             --data_dir /scratch/sk12590/dl_project_data/data \
-            --eval_stride 16 \
+            --eval_stride 2 \
             --batch_size 8 \
             --num_workers 4 \
             --probe_lr 1e-3 \
