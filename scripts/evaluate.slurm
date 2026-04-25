@@ -31,7 +31,7 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --probe_batch_size 256 \
             --knn_k 20 \
             --use_target_encoder \
-            --wandb_org dl-project-sst-org \
-            --wandb_project team-active-matter \
+            --wandb_org dl_project_sst \
+            --wandb_project team_active_matter \
             --run_name linear_probe_and_knn_eval_${SLURM_JOB_ID} \
         "
