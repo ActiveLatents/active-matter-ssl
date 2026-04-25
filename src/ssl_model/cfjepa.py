@@ -53,6 +53,7 @@ class CFJEPA(nn.Module):
         predictor_heads=6,
         # Masking
         within_mask_ratio=0.75,
+        use_checkpointing=False,
         # Loss weights
         lambda_within=1.0,
         lambda_cross=1.0,
@@ -81,6 +82,7 @@ class CFJEPA(nn.Module):
             mlp_ratio=mlp_ratio,
             drop_rate=drop_rate,
             attn_drop_rate=attn_drop_rate,
+            use_checkpointing=use_checkpointing,
         )
 
         self.target_encoder = copy.deepcopy(self.encoder)
@@ -93,6 +95,7 @@ class CFJEPA(nn.Module):
             depth=predictor_depth,
             n_heads=predictor_heads,
             mlp_ratio=mlp_ratio,
+            use_checkpointing=use_checkpointing,
         )
 
     def _gather_tokens(self, tokens, indices):

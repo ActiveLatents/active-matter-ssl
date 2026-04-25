@@ -15,6 +15,7 @@ the heavy encoder only processes visible tokens.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 class RoPE3D(nn.Module):
@@ -192,9 +193,11 @@ class ViTEncoder(nn.Module):
         max_t=8,
         max_h=16,
         max_w=16,
+        use_checkpointing=False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
+        self.use_checkpointing = use_checkpointing
         head_dim = embed_dim // n_heads
 
         self.rope = RoPE3D(head_dim, max_t=max_t, max_h=max_h, max_w=max_w)
@@ -235,7 +238,10 @@ class ViTEncoder(nn.Module):
         """
         rope = self.rope if pos_ids is not None else None
         for block in self.blocks:
-            x = block(x, rope=rope, pos_ids=pos_ids)
+            if self.use_checkpointing and self.training:
+                x = checkpoint(block, x, rope, pos_ids, use_reentrant=False)
+            else:
+                x = block(x, rope=rope, pos_ids=pos_ids)
         x = self.norm(x)
         return x
 

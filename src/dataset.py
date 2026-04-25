@@ -2,6 +2,8 @@ import glob
 import os
 import random
 import re
+import weakref
+from collections import OrderedDict
 
 import h5py
 import numpy as np
@@ -109,6 +111,7 @@ class ActiveMatterDataset(Dataset):
         random_crop=False,
         stats_path=None,
         mode="supervised",
+        max_open_files=4,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -119,6 +122,8 @@ class ActiveMatterDataset(Dataset):
         self.crop_size = crop_size
         self.random_crop = random_crop
         self.mode = mode
+        self._open_files = None
+        self._max_open_files = max_open_files
 
         assert mode in ("supervised", "ssl"), f"Unknown mode: {mode}"
 
@@ -148,6 +153,38 @@ class ActiveMatterDataset(Dataset):
             f"[{split}] {len(self.samples)} samples from {len(self.file_paths)} files "
             f"(mode={mode}, n_frames={n_frames}, stride={stride})"
         )
+
+    def _ensure_file_cache(self):
+        if self._open_files is None:
+            self._open_files = OrderedDict()
+            weakref.finalize(self, self._close_all_files)
+
+    def _close_all_files(self):
+        if self._open_files:
+            for f in self._open_files.values():
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            self._open_files.clear()
+
+    def _get_file_handle(self, path):
+        self._ensure_file_cache()
+        if path in self._open_files:
+            f = self._open_files.pop(path)
+            self._open_files[path] = f
+            return f
+
+        while len(self._open_files) >= self._max_open_files:
+            _, old_f = self._open_files.popitem(last=False)
+            try:
+                old_f.close()
+            except Exception:
+                pass
+
+        f = h5py.File(path, "r", libver="latest", swmr=True)
+        self._open_files[path] = f
+        return f
 
     def _apply_crop(self, x):
         """
@@ -188,11 +225,11 @@ class ActiveMatterDataset(Dataset):
         fp, traj_idx, start, zeta, alpha = self.samples[idx]
         end = start + self.n_frames
 
-        with h5py.File(fp, "r") as f:
-            conc = f["t0_fields"]["concentration"][traj_idx, start:end]
-            vel = f["t1_fields"]["velocity"][traj_idx, start:end]
-            D = f["t2_fields"]["D"][traj_idx, start:end]
-            E = f["t2_fields"]["E"][traj_idx, start:end]
+        f = self._get_file_handle(fp)
+        conc = f["t0_fields"]["concentration"][traj_idx, start:end]
+        vel = f["t1_fields"]["velocity"][traj_idx, start:end]
+        D = f["t2_fields"]["D"][traj_idx, start:end]
+        E = f["t2_fields"]["E"][traj_idx, start:end]
 
         # Stack into (T, 11, 256, 256)
         frames = np.stack([
@@ -222,6 +259,11 @@ class ActiveMatterDataset(Dataset):
             field_dict["labels"] = labels
             return field_dict
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_open_files"] = None
+        return state
+
 
 def build_dataloader(
     data_dir,
@@ -234,6 +276,7 @@ def build_dataloader(
     crop_size=None,
     random_crop=False,
     stats_path=None,
+    prefetch_factor=2,
 ):
     """Build a DataLoader with sensible defaults for each mode and split."""
 
@@ -249,8 +292,8 @@ def build_dataloader(
         mode=mode,
     )
 
-    loader = DataLoader(
-        dataset,
+    loader_kwargs = dict(
+        dataset=dataset,
         batch_size=batch_size,
         shuffle=(split == "train"),
         num_workers=num_workers,
@@ -258,6 +301,10 @@ def build_dataloader(
         drop_last=(split == "train"),
         persistent_workers=(num_workers > 0),
     )
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    loader = DataLoader(**loader_kwargs)
 
     return loader
 

@@ -13,6 +13,7 @@ learn good representations rather than offloading that work to the predictor.
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from .encoder import RoPE3D, TransformerBlock
 
@@ -43,10 +44,12 @@ class Predictor(nn.Module):
         max_t=8,
         max_h=16,
         max_w=16,
+        use_checkpointing=False,
     ):
         super().__init__()
         self.encoder_dim = encoder_dim
         self.predictor_dim = predictor_dim
+        self.use_checkpointing = use_checkpointing
 
         # Project from encoder dim to predictor dim
         self.input_proj = nn.Linear(encoder_dim, predictor_dim)
@@ -123,7 +126,12 @@ class Predictor(nn.Module):
         batch_pos = pos_ids.unsqueeze(0) if pos_ids is not None else None
 
         for block in self.blocks:
-            all_tokens = block(all_tokens, rope=rope, pos_ids=batch_pos)
+            if self.use_checkpointing and self.training:
+                all_tokens = checkpoint(
+                    block, all_tokens, rope, batch_pos, use_reentrant=False
+                )
+            else:
+                all_tokens = block(all_tokens, rope=rope, pos_ids=batch_pos)
         all_tokens = self.norm(all_tokens)
 
         predictions = torch.gather(all_tokens, 1, mask_idx)

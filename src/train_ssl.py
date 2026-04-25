@@ -107,6 +107,9 @@ def validate(model, val_loader, device):
 # ── Training loop ──────────────────────────────────────────────────────────
 
 def train(args):
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = args.allow_tf32
+        torch.backends.cudnn.allow_tf32 = args.allow_tf32
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -120,6 +123,7 @@ def train(args):
         "val_stride": args.val_stride,
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
+        "prefetch_factor": args.prefetch_factor,
         # Model
         "embed_dim": args.embed_dim,
         "encoder_depth": args.encoder_depth,
@@ -128,6 +132,8 @@ def train(args):
         "predictor_depth": args.predictor_depth,
         "predictor_heads": args.predictor_heads,
         "within_mask_ratio": args.within_mask_ratio,
+        "use_checkpointing": args.use_checkpointing,
+        "compile_model": args.compile_model,
         # Loss weights
         "lambda_within": args.lambda_within,
         "lambda_cross": args.lambda_cross,
@@ -162,6 +168,7 @@ def train(args):
         stride=args.train_stride,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
     )
 
     val_loader = build_dataloader(
@@ -172,6 +179,7 @@ def train(args):
         stride=args.val_stride,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
     )
 
     # ── Model ───────────────────────────────────────────────────
@@ -189,10 +197,15 @@ def train(args):
         predictor_depth=args.predictor_depth,
         predictor_heads=args.predictor_heads,
         within_mask_ratio=args.within_mask_ratio,
+        use_checkpointing=args.use_checkpointing,
         lambda_within=args.lambda_within,
         lambda_cross=args.lambda_cross,
         lambda_sigreg=args.lambda_sigreg,
     ).to(device)
+
+    if args.compile_model and hasattr(torch, "compile"):
+        print("Compiling model...")
+        model = torch.compile(model)
 
     model.param_count()
 
@@ -260,7 +273,7 @@ def train(args):
             field_dict = {k: v.to(device) for k, v in batch.items() if k != "labels"}
 
             # Forward
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             with autocast("cuda", dtype=torch.bfloat16):
                 loss, loss_dict = model.forward_ssl(field_dict)
 
@@ -365,6 +378,7 @@ if __name__ == "__main__":
     parser.add_argument("--val_stride", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=6)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--prefetch_factor", type=int, default=2)
 
     # Model
     parser.add_argument("--embed_dim", type=int, default=384)
@@ -374,6 +388,10 @@ if __name__ == "__main__":
     parser.add_argument("--predictor_depth", type=int, default=4)
     parser.add_argument("--predictor_heads", type=int, default=6)
     parser.add_argument("--within_mask_ratio", type=float, default=0.75)
+    parser.add_argument("--use_checkpointing", action="store_true",
+                        help="Checkpoint transformer blocks to trade compute for memory")
+    parser.add_argument("--compile_model", action="store_true",
+                        help="Use torch.compile for potentially faster steady-state training")
 
     # Loss weights
     parser.add_argument("--lambda_within", type=float, default=1.0)
@@ -386,6 +404,8 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=0.05)
     parser.add_argument("--warmup_epochs", type=int, default=10)
     parser.add_argument("--grad_clip", type=float, default=1.0)
+    parser.add_argument("--allow_tf32", action="store_true",
+                        help="Enable TF32 matmuls/convolutions on Ampere+ GPUs")
     parser.add_argument("--base_ema", type=float, default=0.996,
                         help="Starting EMA momentum (cosine-scheduled up to max_ema)")
     parser.add_argument("--max_ema", type=float, default=1.0,
