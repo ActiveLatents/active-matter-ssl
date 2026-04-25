@@ -217,21 +217,23 @@ class CFJEPA(nn.Module):
             target_param.data.mul_(momentum).add_(param.data, alpha=1.0 - momentum)
 
     @torch.no_grad()
-    def encode(self, field_dict, pool="mean"):
+    def encode(self, field_dict, pool="mean", use_target_encoder=False):
         """
         Extract representations for evaluation (linear probe / kNN).
 
         Args:
-            field_dict: dict with field group tensors
-            pool:       "mean" for mean pooling over all tokens
+            field_dict:          dict with field group tensors
+            pool:                "mean" for mean pooling over all tokens
+            use_target_encoder:  if True, use EMA target encoder instead of online encoder
 
         Returns:
             features: (B, embed_dim)
         """
+        encoder = self.target_encoder if use_target_encoder else self.encoder
         all_tokens, _, _, pos_ids = self.patch_embed(field_dict)
         B = all_tokens.shape[0]
         full_pos_ids = pos_ids.unsqueeze(0).expand(B, -1, -1)
-        encoder_out = self.encoder(all_tokens, pos_ids=full_pos_ids)
+        encoder_out = encoder(all_tokens, pos_ids=full_pos_ids)
 
         if pool == "mean":
             return encoder_out.mean(dim=1)
