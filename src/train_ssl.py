@@ -82,6 +82,9 @@ def validate(model, val_loader, device):
     total_loss = 0.0
     total_within = 0.0
     total_cross = 0.0
+    total_future = 0.0
+    total_vorticity = 0.0
+    total_spectral = 0.0
     n_batches = 0
 
     for batch in val_loader:
@@ -93,6 +96,9 @@ def validate(model, val_loader, device):
         total_loss += loss.item()
         total_within += loss_dict["loss_within"].item()
         total_cross += loss_dict["loss_cross"].item()
+        total_future += loss_dict["loss_future"].item()
+        total_vorticity += loss_dict["loss_vorticity"].item()
+        total_spectral += loss_dict["loss_spectral"].item()
         n_batches += 1
 
     model.train()
@@ -101,6 +107,9 @@ def validate(model, val_loader, device):
         "val/loss": total_loss / n_batches,
         "val/loss_within": total_within / n_batches,
         "val/loss_cross": total_cross / n_batches,
+        "val/loss_future": total_future / n_batches,
+        "val/loss_vorticity": total_vorticity / n_batches,
+        "val/loss_spectral": total_spectral / n_batches,
     }
 
 
@@ -137,7 +146,10 @@ def train(args):
         # Loss weights
         "lambda_within": args.lambda_within,
         "lambda_cross": args.lambda_cross,
+        "lambda_future": args.lambda_future,
         "lambda_sigreg": args.lambda_sigreg,
+        "lambda_vorticity": args.lambda_vorticity,
+        "lambda_spectral": args.lambda_spectral,
         # Training
         "epochs": args.epochs,
         "base_lr": args.base_lr,
@@ -200,7 +212,10 @@ def train(args):
         use_checkpointing=args.use_checkpointing,
         lambda_within=args.lambda_within,
         lambda_cross=args.lambda_cross,
+        lambda_future=args.lambda_future,
         lambda_sigreg=args.lambda_sigreg,
+        lambda_vorticity=args.lambda_vorticity,
+        lambda_spectral=args.lambda_spectral,
     ).to(device)
 
     if args.compile_model and hasattr(torch, "compile"):
@@ -302,7 +317,10 @@ def train(args):
                     "train/loss": loss.item(),
                     "train/loss_within": loss_dict["loss_within"].item(),
                     "train/loss_cross": loss_dict["loss_cross"].item(),
+                    "train/loss_future": loss_dict["loss_future"].item(),
                     "train/sigreg_total": loss_dict["sigreg_total"].item(),
+                    "train/loss_vorticity": loss_dict["loss_vorticity"].item(),
+                    "train/loss_spectral": loss_dict["loss_spectral"].item(),
                     "train/lr": lr,
                     "train/ema_momentum": ema_momentum,
                     "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
@@ -315,12 +333,15 @@ def train(args):
                 print(
                     f"  [{epoch+1}/{args.epochs}] "
                     f"step {global_step} | "
-                    f"loss {loss.item():.4f} | "
-                    f"within {loss_dict['loss_within'].item():.4f} | "
-                    f"cross {loss_dict['loss_cross'].item():.4f} | "
-                    f"sigreg {loss_dict['sigreg_total'].item():.2f} | "
-                    f"lr {lr:.2e} | "
-                    f"grad {grad_norm:.2f}"
+                        f"loss {loss.item():.4f} | "
+                        f"within {loss_dict['loss_within'].item():.4f} | "
+                        f"cross {loss_dict['loss_cross'].item():.4f} | "
+                        f"future {loss_dict['loss_future'].item():.4f} | "
+                        f"vort {loss_dict['loss_vorticity'].item():.4f} | "
+                        f"spec {loss_dict['loss_spectral'].item():.4f} | "
+                        f"sigreg {loss_dict['sigreg_total'].item():.2f} | "
+                        f"lr {lr:.2e} | "
+                        f"grad {grad_norm:.2f}"
                 )
 
         # ── Epoch summary ───────────────────────────────────────
@@ -396,7 +417,10 @@ if __name__ == "__main__":
     # Loss weights
     parser.add_argument("--lambda_within", type=float, default=1.0)
     parser.add_argument("--lambda_cross", type=float, default=1.0)
+    parser.add_argument("--lambda_future", type=float, default=0.0)
     parser.add_argument("--lambda_sigreg", type=float, default=0.01)
+    parser.add_argument("--lambda_vorticity", type=float, default=0.0)
+    parser.add_argument("--lambda_spectral", type=float, default=0.0)
 
     # Training
     parser.add_argument("--epochs", type=int, default=100)

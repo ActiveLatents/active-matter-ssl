@@ -41,6 +41,27 @@ def prediction_loss(predictions, targets):
     return F.mse_loss(predictions, targets, reduction='none').sum(dim=-1).mean()
 
 
+def scalar_aux_loss(predictions, targets):
+    """Stable regression loss for scalar physics targets."""
+    return F.smooth_l1_loss(predictions, targets)
+
+
+def spectral_consistency_loss(pred_maps, target_maps, eps=1e-6):
+    """
+    Match 2D power spectra of predicted and target scalar fields.
+
+    Args:
+        pred_maps:   (B, T, H, W)
+        target_maps: (B, T, H, W)
+    """
+    pred_fft = torch.fft.rfft2(pred_maps.float(), dim=(-2, -1))
+    targ_fft = torch.fft.rfft2(target_maps.float(), dim=(-2, -1))
+
+    pred_power = torch.log1p(pred_fft.abs().square() + eps)
+    targ_power = torch.log1p(targ_fft.abs().square() + eps)
+    return F.mse_loss(pred_power, targ_power)
+
+
 # ── SIGReg ───────────────────────────────────────────────────────────────────
 
 def sigreg_loss(x, sketch_dim=64):

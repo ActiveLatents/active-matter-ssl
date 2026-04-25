@@ -27,7 +27,12 @@ from .patch_embed import ChannelFactoredPatchEmbed
 from .encoder import ViTEncoder
 from .predictor import Predictor
 from .masking import generate_masks, batch_mask_indices
-from .losses import prediction_loss, sigreg_loss
+from .losses import (
+    prediction_loss,
+    scalar_aux_loss,
+    sigreg_loss,
+    spectral_consistency_loss,
+)
 
 
 class CFJEPA(nn.Module):
@@ -57,14 +62,23 @@ class CFJEPA(nn.Module):
         # Loss weights
         lambda_within=1.0,
         lambda_cross=1.0,
+        lambda_future=0.0,
         lambda_sigreg=0.1,
+        lambda_vorticity=0.0,
+        lambda_spectral=0.0,
     ):
         super().__init__()
 
         self.within_mask_ratio = within_mask_ratio
         self.lambda_within = lambda_within
         self.lambda_cross = lambda_cross
+        self.lambda_future = lambda_future
         self.lambda_sigreg = lambda_sigreg
+        self.lambda_vorticity = lambda_vorticity
+        self.lambda_spectral = lambda_spectral
+        self.tube_t = tube_t
+        self.patch_h = patch_h
+        self.patch_w = patch_w
 
         self.patch_embed = ChannelFactoredPatchEmbed(
             embed_dim=embed_dim,
@@ -97,6 +111,54 @@ class CFJEPA(nn.Module):
             mlp_ratio=mlp_ratio,
             use_checkpointing=use_checkpointing,
         )
+        self.vorticity_head = nn.Linear(embed_dim, 1)
+
+    def _pool_scalar_field_to_tokens(self, field):
+        """
+        field: (B, T, H, W)
+        returns: (B, tokens_per_group)
+        """
+        pooled = F.avg_pool3d(
+            field.unsqueeze(1),
+            kernel_size=(self.tube_t, self.patch_h, self.patch_w),
+            stride=(self.tube_t, self.patch_h, self.patch_w),
+        )
+        return pooled.flatten(2).squeeze(1)
+
+    def _compute_vorticity_targets(self, velocity):
+        """
+        velocity: (B, T, 2, H, W)
+        returns pooled vorticity target: (B, tokens_per_group)
+        """
+        u = velocity[:, :, 0]
+        v = velocity[:, :, 1]
+        dv_dx = 0.5 * (torch.roll(v, shifts=-1, dims=-1) - torch.roll(v, shifts=1, dims=-1))
+        du_dy = 0.5 * (torch.roll(u, shifts=-1, dims=-2) - torch.roll(u, shifts=1, dims=-2))
+        vorticity = dv_dx - du_dy
+        return self._pool_scalar_field_to_tokens(vorticity)
+
+    def _select_group_predictions(self, preds, mask_ids, group_start, group_end):
+        """
+        preds:    (B, K, D_or_1)
+        mask_ids: (B, K)
+        """
+        group_mask = (mask_ids[0] >= group_start) & (mask_ids[0] < group_end)
+        if not torch.any(group_mask):
+            return None, None
+        return preds[:, group_mask], mask_ids[:, group_mask] - group_start
+
+    def _vorticity_loss_for_predictions(self, preds, mask_ids, field_indices, vorticity_targets):
+        vel_start, vel_end = field_indices["velocity"]
+        vel_preds, vel_local_ids = self._select_group_predictions(
+            preds, mask_ids, vel_start, vel_end
+        )
+        if vel_preds is None:
+            return preds.new_zeros(())
+        pred_vorticity = self.vorticity_head(vel_preds).squeeze(-1)
+        target_vorticity = self._gather_tokens(
+            vorticity_targets.unsqueeze(-1), vel_local_ids
+        ).squeeze(-1)
+        return scalar_aux_loss(pred_vorticity, target_vorticity)
 
     def _gather_tokens(self, tokens, indices):
         """
@@ -130,6 +192,7 @@ class CFJEPA(nn.Module):
         # 1. Patch embedding
         all_tokens, field_indices, grid_shape, pos_ids = self.patch_embed(field_dict)
         B, N_total, D = all_tokens.shape
+        vorticity_targets = self._compute_vorticity_targets(field_dict["velocity"])
 
         # 2. Generate spatiotemporal block masks
         within_masks, cross_masks = generate_masks(
@@ -188,6 +251,57 @@ class CFJEPA(nn.Module):
         # ── Losses ─────────────────────────────────────────────────────
         l_within = prediction_loss(w_preds, w_targets)
         l_cross  = prediction_loss(c_preds, c_targets)
+        l_vorticity = w_preds.new_zeros(())
+        if self.lambda_vorticity > 0:
+            l_vorticity = 0.5 * self._vorticity_loss_for_predictions(
+                w_preds, w_mask_ids, field_indices, vorticity_targets
+            ) + 0.5 * self._vorticity_loss_for_predictions(
+                c_preds, c_mask_ids, field_indices, vorticity_targets
+            )
+
+        l_future = w_preds.new_zeros(())
+        l_spectral = w_preds.new_zeros(())
+        if self.lambda_future > 0:
+            split_t = grid_shape[0] // 2
+            context_ids = torch.nonzero(pos_ids[:, 0] < split_t, as_tuple=False).squeeze(-1)
+            future_ids = torch.nonzero(pos_ids[:, 0] >= split_t, as_tuple=False).squeeze(-1)
+
+            f_vis_ids = batch_mask_indices(context_ids, B)
+            f_mask_ids = batch_mask_indices(future_ids, B)
+            f_visible_tokens = self._gather_tokens(all_tokens, f_vis_ids)
+            f_pos_ids = pos_ids[f_vis_ids]
+            f_encoder_out = self.encoder(f_visible_tokens, pos_ids=f_pos_ids)
+            f_preds = self.predictor(
+                visible_tokens=f_encoder_out,
+                visible_indices=f_vis_ids,
+                masked_indices=f_mask_ids,
+                total_tokens=N_total,
+                pos_ids=pos_ids,
+            )
+            f_targets = F.normalize(
+                self._gather_tokens(full_target_out, f_mask_ids).float(), dim=-1
+            )
+            l_future = prediction_loss(f_preds, f_targets)
+
+            if self.lambda_vorticity > 0:
+                l_vorticity = (2.0 * l_vorticity + self._vorticity_loss_for_predictions(
+                    f_preds, f_mask_ids, field_indices, vorticity_targets
+                )) / 3.0
+
+            if self.lambda_spectral > 0:
+                vel_start, vel_end = field_indices["velocity"]
+                vel_preds, vel_local_ids = self._select_group_predictions(
+                    f_preds, f_mask_ids, vel_start, vel_end
+                )
+                if vel_preds is not None:
+                    pred_vorticity = self.vorticity_head(vel_preds).squeeze(-1)
+                    target_vorticity = self._gather_tokens(
+                        vorticity_targets.unsqueeze(-1), vel_local_ids
+                    ).squeeze(-1)
+                    n_t_future = grid_shape[0] - split_t
+                    pred_maps = pred_vorticity.view(B, n_t_future, grid_shape[1], grid_shape[2])
+                    target_maps = target_vorticity.view(B, n_t_future, grid_shape[1], grid_shape[2])
+                    l_spectral = spectral_consistency_loss(pred_maps, target_maps)
 
         # SIGReg equally weighted over within-field and cross-field predictor
         # outputs. Subsample each independently to keep O(N^2) within memory.
@@ -201,14 +315,20 @@ class CFJEPA(nn.Module):
         total_loss = (
             self.lambda_within  * l_within
             + self.lambda_cross * l_cross
+            + self.lambda_future * l_future
             + self.lambda_sigreg * l_sigreg
+            + self.lambda_vorticity * l_vorticity
+            + self.lambda_spectral * l_spectral
         )
 
         loss_dict = {
             "loss_total":   total_loss.detach(),
             "loss_within":  l_within.detach(),
             "loss_cross":   l_cross.detach(),
+            "loss_future":  l_future.detach(),
             "sigreg_total": l_sigreg.detach(),
+            "loss_vorticity": l_vorticity.detach(),
+            "loss_spectral": l_spectral.detach(),
         }
 
         return total_loss, loss_dict
