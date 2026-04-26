@@ -20,6 +20,8 @@ export PYTHON_BIN="${PYTHON_BIN:-/scratch/$USER/my_env/conda_envs/${CONDA_ENV}/b
 export DATA_DIR="${DATA_DIR:-/scratch/zl6113/active-matter/data}"
 export CHECKPOINT_DIR="${CHECKPOINT_DIR:-/scratch/$USER/active-matter-ssl/runs/ssl}"
 export RUN_NAME="${RUN_NAME:-cfjepa-future-concentrationmask}"
+export WANDB_PROJECT="${WANDB_PROJECT:-dl_project_sst}"
+export WANDB_ENTITY="${WANDB_ENTITY:-team_active_matter}"
 export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-/scratch/$USER/my_env/conda_pkgs}"
 export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-/scratch/$USER/my_env/conda_envs}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/scratch/$USER/my_env/pip_cache}"
@@ -38,8 +40,9 @@ singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   export XDG_CACHE_HOME='${XDG_CACHE_HOME}'
   export CONDA_NO_PLUGINS=true
   cd /scratch/$USER/active-matter-ssl
-  source ./wandb_env.sh
   conda activate '${CONDA_ENV}'
+  export WANDB_API_KEY=\$(tr -d '\r\n' < ./cache/wandb/api_key)
+  export WANDB_ENTITY='${WANDB_ENTITY}'
 
   ${PYTHON_BIN} -m src.train_ssl \
     --data_dir ${DATA_DIR} \
@@ -72,7 +75,7 @@ singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
     --compile_model \
     --log_every 50 \
     --val_every 5 \
-    --wandb_project active-matter-ssl \
+    --wandb_project ${WANDB_PROJECT} \
     --run_name ${RUN_NAME} \
     --checkpoint_dir ${CHECKPOINT_DIR}
 "
