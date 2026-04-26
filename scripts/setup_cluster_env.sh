@@ -20,7 +20,7 @@ fi
 
 rsync -av --delete "${REPO_ROOT}/" "${SCRATCH_ROOT}/"
 
-singularity exec --nv --overlay "${OVERLAY_PATH}:rw" "${IMAGE_PATH}" /bin/bash -lc "
+singularity exec --fakeroot --nv --overlay "${OVERLAY_PATH}:rw" "${IMAGE_PATH}" /bin/bash -lc "
   set -euo pipefail
   source /ext3/env.sh
   cd /scratch/${USER}/active-matter-ssl
