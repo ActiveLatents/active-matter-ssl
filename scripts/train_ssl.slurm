@@ -15,17 +15,31 @@ mkdir -p logs
 
 export SIF="${SIF:-/share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif}"
 export OVERLAY="${OVERLAY:-/scratch/$USER/my_env/overlay-25GB-500K.ext3:ro}"
-export CONDA_ENV="${CONDA_ENV:-active-matter-ssl}"
-export PYTHON_BIN="${PYTHON_BIN:-/ext3/${CONDA_ENV}/bin/python}"
+export CONDA_ENV="${CONDA_ENV:-amssl}"
+export PYTHON_BIN="${PYTHON_BIN:-/scratch/$USER/my_env/conda_envs/${CONDA_ENV}/bin/python}"
 export DATA_DIR="${DATA_DIR:-/scratch/zl6113/active-matter/data}"
 export CHECKPOINT_DIR="${CHECKPOINT_DIR:-/scratch/$USER/active-matter-ssl/runs/ssl}"
 export RUN_NAME="${RUN_NAME:-cfjepa-future-concentrationmask}"
+export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-/scratch/$USER/my_env/conda_pkgs}"
+export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-/scratch/$USER/my_env/conda_envs}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/scratch/$USER/my_env/pip_cache}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/scratch/$USER/my_env/.cache}"
+export HOME="${HOME:-/scratch/$USER/my_env/home}"
+export TMPDIR="${TMPDIR:-/scratch/$USER/my_env/tmp}"
 
 singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   set -euo pipefail
   source /ext3/env.sh
+  export HOME='${HOME}'
+  export TMPDIR='${TMPDIR}'
+  export CONDA_PKGS_DIRS='${CONDA_PKGS_DIRS}'
+  export CONDA_ENVS_PATH='${CONDA_ENVS_PATH}'
+  export PIP_CACHE_DIR='${PIP_CACHE_DIR}'
+  export XDG_CACHE_HOME='${XDG_CACHE_HOME}'
+  export CONDA_NO_PLUGINS=true
   cd /scratch/$USER/active-matter-ssl
   source ./wandb_env.sh
+  conda activate '${CONDA_ENV}'
 
   ${PYTHON_BIN} -m src.train_ssl \
     --data_dir ${DATA_DIR} \
