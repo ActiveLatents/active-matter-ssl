@@ -14,7 +14,7 @@
 #SBATCH --mail-user=sk12590@nyu.edu
 
 # Activate environment
-singularity exec --nv --overlay /scratch/$USER/active-matter-ssl/overlay-25GB-500K.ext3:rw \
+singularity exec --nv --overlay /scratch/$USER/my_env/overlay-25GB-500K.ext3:rw \
     /share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif \
     /bin/bash -c "
         source /ext3/env.sh
@@ -24,7 +24,7 @@ singularity exec --nv --overlay /scratch/$USER/active-matter-ssl/overlay-25GB-50
         source ./wandb_env.sh
 
         python -m src.train_ssl \
-            --data_dir /scratch/$USER/dl_project_data/data \
+            --data_dir /scratch/zl6113/active-matter/data \
             --n_frames 16 \
             --train_stride 2 \
             --val_stride 1 \

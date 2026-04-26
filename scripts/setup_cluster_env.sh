@@ -3,12 +3,14 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH_ROOT="/scratch/${USER}/active-matter-ssl"
-OVERLAY_PATH="${SCRATCH_ROOT}/overlay-25GB-500K.ext3"
+OVERLAY_DIR="/scratch/${USER}/my_env"
+OVERLAY_PATH="${OVERLAY_DIR}/overlay-25GB-500K.ext3"
 IMAGE_PATH="/share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif"
 ENV_NAME="active-matter-ssl"
 PYTHON_VERSION="3.10"
 
 mkdir -p "${SCRATCH_ROOT}"
+mkdir -p "${OVERLAY_DIR}"
 
 if [[ ! -f "${OVERLAY_PATH}" ]]; then
   echo "Missing overlay: ${OVERLAY_PATH}" >&2
