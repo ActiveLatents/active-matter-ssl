@@ -18,9 +18,76 @@ space and time rather than interpolating from nearby unmasked neighbors.
 """
 
 import torch
+import torch.nn.functional as F
 
 
-def within_field_block_mask(field_indices, grid_shape, mask_ratio=0.75, device="cpu"):
+def _concentration_saliency(concentration, grid_shape, device="cpu"):
+    """
+    Build a token-grid saliency map from concentration dynamics.
+
+    concentration: (B, T, 1, H, W)
+    returns:       (n_t, n_h, n_w)
+    """
+    conc = concentration.to(device).float().squeeze(2)
+    grad_x = 0.5 * (
+        torch.roll(conc, shifts=-1, dims=-1) - torch.roll(conc, shifts=1, dims=-1)
+    )
+    grad_y = 0.5 * (
+        torch.roll(conc, shifts=-1, dims=-2) - torch.roll(conc, shifts=1, dims=-2)
+    )
+    grad_mag = torch.sqrt(grad_x.square() + grad_y.square() + 1e-6)
+    temporal_var = conc.std(dim=1, keepdim=True).expand_as(conc)
+    saliency = grad_mag + 0.5 * temporal_var
+
+    B, T, H, W = saliency.shape
+    n_t, n_h, n_w = grid_shape
+    pool_t = T // n_t
+    pool_h = H // n_h
+    pool_w = W // n_w
+    pooled = F.avg_pool3d(
+        saliency.unsqueeze(1),
+        kernel_size=(pool_t, pool_h, pool_w),
+        stride=(pool_t, pool_h, pool_w),
+    ).squeeze(1)
+    return pooled.mean(dim=0)
+
+
+def _sample_block_origin_from_saliency(saliency, bt, bh, bw, device="cpu"):
+    """
+    Sample a block origin with probability proportional to average saliency in
+    each valid block footprint.
+    """
+    n_t, n_h, n_w = saliency.shape
+    max_t0 = max(1, n_t - bt + 1)
+    max_h0 = max(1, n_h - bh + 1)
+    max_w0 = max(1, n_w - bw + 1)
+
+    block_scores = torch.empty(max_t0, max_h0, max_w0, device=device)
+    for t0 in range(max_t0):
+        for h0 in range(max_h0):
+            for w0 in range(max_w0):
+                block_scores[t0, h0, w0] = saliency[
+                    t0:t0 + bt, h0:h0 + bh, w0:w0 + bw
+                ].mean()
+
+    probs = block_scores.reshape(-1)
+    probs = probs / probs.sum().clamp_min(1e-6)
+    flat_idx = torch.multinomial(probs, 1).item()
+    t0 = flat_idx // (max_h0 * max_w0)
+    hw_idx = flat_idx % (max_h0 * max_w0)
+    h0 = hw_idx // max_w0
+    w0 = hw_idx % max_w0
+    return t0, h0, w0
+
+
+def within_field_block_mask(
+    field_indices,
+    grid_shape,
+    mask_ratio=0.75,
+    device="cpu",
+    concentration=None,
+    strategy="random",
+):
     """
     For each field group, mask a single contiguous spatiotemporal block.
 
@@ -60,10 +127,16 @@ def within_field_block_mask(field_indices, grid_shape, mask_ratio=0.75, device="
         bh = max(1, min(n_h, round(n_h * spatial_ratio)))
         bw = max(1, min(n_w, round(n_w * spatial_ratio)))
 
-        # Random block origin (uniform over valid positions)
-        t0 = torch.randint(0, max(1, n_t - bt + 1), (1,), device=device).item()
-        h0 = torch.randint(0, max(1, n_h - bh + 1), (1,), device=device).item()
-        w0 = torch.randint(0, max(1, n_w - bw + 1), (1,), device=device).item()
+        if strategy == "concentration" and concentration is not None:
+            saliency = _concentration_saliency(concentration, grid_shape, device=device)
+            t0, h0, w0 = _sample_block_origin_from_saliency(
+                saliency, bt, bh, bw, device=device
+            )
+        else:
+            # Random block origin (uniform over valid positions)
+            t0 = torch.randint(0, max(1, n_t - bt + 1), (1,), device=device).item()
+            h0 = torch.randint(0, max(1, n_h - bh + 1), (1,), device=device).item()
+            w0 = torch.randint(0, max(1, n_w - bw + 1), (1,), device=device).item()
 
         # Vectorized 3D block mask via broadcasting
         t_in = (torch.arange(n_t, device=device) >= t0) & \
@@ -114,7 +187,14 @@ def cross_field_mask(field_indices, target_group, device="cpu"):
     return visible_ids, masked_ids
 
 
-def generate_masks(field_indices, grid_shape, within_mask_ratio=0.75, device="cpu"):
+def generate_masks(
+    field_indices,
+    grid_shape,
+    within_mask_ratio=0.75,
+    device="cpu",
+    concentration=None,
+    strategy="random",
+):
     """
     Generate both within-field and cross-field masks for one training step.
 
@@ -132,7 +212,12 @@ def generate_masks(field_indices, grid_shape, within_mask_ratio=0.75, device="cp
     """
     # Within-field: mask a contiguous spatiotemporal block in each group
     w_visible, w_masked = within_field_block_mask(
-        field_indices, grid_shape, mask_ratio=within_mask_ratio, device=device,
+        field_indices,
+        grid_shape,
+        mask_ratio=within_mask_ratio,
+        device=device,
+        concentration=concentration,
+        strategy=strategy,
     )
 
     # Cross-field: randomly pick one group to mask entirely

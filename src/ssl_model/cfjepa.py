@@ -58,6 +58,7 @@ class CFJEPA(nn.Module):
         predictor_heads=6,
         # Masking
         within_mask_ratio=0.75,
+        mask_strategy="random",
         use_checkpointing=False,
         # Loss weights
         lambda_within=1.0,
@@ -70,6 +71,7 @@ class CFJEPA(nn.Module):
         super().__init__()
 
         self.within_mask_ratio = within_mask_ratio
+        self.mask_strategy = mask_strategy
         self.lambda_within = lambda_within
         self.lambda_cross = lambda_cross
         self.lambda_future = lambda_future
@@ -200,6 +202,8 @@ class CFJEPA(nn.Module):
             grid_shape=grid_shape,
             within_mask_ratio=self.within_mask_ratio,
             device=device,
+            concentration=field_dict["concentration"],
+            strategy=self.mask_strategy,
         )
 
         # 3. Target pass: full encoder on all tokens.

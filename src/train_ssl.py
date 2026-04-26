@@ -141,6 +141,7 @@ def train(args):
         "predictor_depth": args.predictor_depth,
         "predictor_heads": args.predictor_heads,
         "within_mask_ratio": args.within_mask_ratio,
+        "mask_strategy": args.mask_strategy,
         "use_checkpointing": args.use_checkpointing,
         "compile_model": args.compile_model,
         # Loss weights
@@ -209,6 +210,7 @@ def train(args):
         predictor_depth=args.predictor_depth,
         predictor_heads=args.predictor_heads,
         within_mask_ratio=args.within_mask_ratio,
+        mask_strategy=args.mask_strategy,
         use_checkpointing=args.use_checkpointing,
         lambda_within=args.lambda_within,
         lambda_cross=args.lambda_cross,
@@ -409,6 +411,8 @@ if __name__ == "__main__":
     parser.add_argument("--predictor_depth", type=int, default=4)
     parser.add_argument("--predictor_heads", type=int, default=6)
     parser.add_argument("--within_mask_ratio", type=float, default=0.75)
+    parser.add_argument("--mask_strategy", type=str, default="random",
+                        choices=["random", "concentration"])
     parser.add_argument("--use_checkpointing", action="store_true",
                         help="Checkpoint transformer blocks to trade compute for memory")
     parser.add_argument("--compile_model", action="store_true",
