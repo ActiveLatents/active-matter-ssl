@@ -1,39 +1,34 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRATCH_ROOT="/scratch/${USER}/active-matter-ssl"
-OVERLAY_DIR="/scratch/${USER}/my_env"
-OVERLAY_PATH="${OVERLAY_DIR}/overlay-25GB-500K.ext3"
-IMAGE_PATH="/share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif"
-ENV_NAME="active-matter-ssl"
-PYTHON_VERSION="3.10"
+export SIF="${SIF:-/share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif}"
+export OVERLAY="${OVERLAY:-/scratch/$USER/my_env/overlay-25GB-500K.ext3:rw}"
+export CONDA_ENV="${CONDA_ENV:-active-matter-ssl}"
+export ENV_PREFIX="${ENV_PREFIX:-/ext3/${CONDA_ENV}}"
+export PYTHON_BIN="${PYTHON_BIN:-${ENV_PREFIX}/bin/python}"
+export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-/scratch/$USER/my_env/conda_pkgs}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/scratch/$USER/my_env/pip_cache}"
 
-mkdir -p "${SCRATCH_ROOT}"
-mkdir -p "${OVERLAY_DIR}"
+mkdir -p /scratch/$USER/my_env
+mkdir -p "${CONDA_PKGS_DIRS}"
+mkdir -p "${PIP_CACHE_DIR}"
 
-if [[ ! -f "${OVERLAY_PATH}" ]]; then
-  echo "Missing overlay: ${OVERLAY_PATH}" >&2
-  echo "Create or copy it first under /scratch/\$USER/active-matter-ssl" >&2
-  exit 1
-fi
-
-rsync -av --delete "${REPO_ROOT}/" "${SCRATCH_ROOT}/"
-
-singularity exec --fakeroot --nv --overlay "${OVERLAY_PATH}:rw" "${IMAGE_PATH}" /bin/bash -lc "
+singularity exec --fakeroot --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   set -euo pipefail
   source /ext3/env.sh
-  cd /scratch/${USER}/active-matter-ssl
+  export CONDA_PKGS_DIRS='${CONDA_PKGS_DIRS}'
+  export PIP_CACHE_DIR='${PIP_CACHE_DIR}'
 
-  if ! conda env list | awk '{print \$1}' | grep -qx '${ENV_NAME}'; then
-    conda create -y -n '${ENV_NAME}' python=${PYTHON_VERSION}
+  cd /scratch/$USER/active-matter-ssl
+
+  if [[ ! -x '${PYTHON_BIN}' ]]; then
+    conda create -y -p '${ENV_PREFIX}' python=3.10
   fi
 
-  conda activate '${ENV_NAME}'
+  conda activate '${ENV_PREFIX}'
   python -m pip install --upgrade pip
   python -m pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision
   python -m pip install -r requirements.txt
-  python -m pip install jupyterlab
 
   python - <<'PY'
 import torch, numpy, scipy, sklearn, yaml, h5py, wandb, einops, timm, tqdm
