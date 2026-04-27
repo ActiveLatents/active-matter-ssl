@@ -29,6 +29,8 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/scratch/$USER/my_env/.cache}"
 export HOME="${HOME:-/scratch/$USER/my_env/home}"
 export TMPDIR="${TMPDIR:-/scratch/$USER/my_env/tmp}"
 
+mkdir -p "${CONDA_PKGS_DIRS}" "${CONDA_ENVS_PATH}" "${PIP_CACHE_DIR}" "${XDG_CACHE_HOME}" "${HOME}" "${TMPDIR}"
+
 singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   set -euo pipefail
   source /ext3/env.sh
