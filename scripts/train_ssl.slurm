@@ -44,7 +44,7 @@ singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   export CONDA_NO_PLUGINS=true
   cd /scratch/$USER/active-matter-ssl
   conda activate '${ENV_PREFIX}'
-  export WANDB_API_KEY=\$(tr -d '\r\n' < ./cache/wandb/api_key)
+  export WANDB_API_KEY=\$(tr -d '\r\n' < /scratch/$USER/.cache/wandb/api_key)
   export WANDB_ENTITY='${WANDB_ENTITY}'
 
   ${PYTHON_BIN} -m src.train_ssl \

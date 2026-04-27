@@ -43,7 +43,7 @@ singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   export XDG_CACHE_HOME='${XDG_CACHE_HOME}'
   export CONDA_NO_PLUGINS=true
   cd /scratch/$USER/active-matter-ssl
-  export WANDB_API_KEY=\$(tr -d '\r\n' < ./cache/wandb/api_key)
+  export WANDB_API_KEY=\$(tr -d '\r\n' < /scratch/$USER/.cache/wandb/api_key)
   export WANDB_ENTITY='${WANDB_ENTITY}'
   conda activate '${ENV_PREFIX}'
 
