@@ -15,7 +15,7 @@ mkdir -p logs
 
 export SIF="${SIF:-/share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif}"
 export OVERLAY="${OVERLAY:-/scratch/$USER/my_env/overlay-25GB-500K.ext3:ro}"
-export CONDA_ENV="${CONDA_ENV:-amssl}"
+export CONDA_ENV="${CONDA_ENV:-am_ssl}"
 export PYTHON_BIN="${PYTHON_BIN:-/scratch/$USER/my_env/conda_envs/${CONDA_ENV}/bin/python}"
 export DATA_DIR="${DATA_DIR:-/scratch/zl6113/active-matter/data}"
 export CHECKPOINT_DIR="${CHECKPOINT_DIR:-/scratch/$USER/active-matter-ssl/runs/ssl}"
