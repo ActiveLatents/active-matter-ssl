@@ -16,7 +16,8 @@ mkdir -p logs
 export SIF="${SIF:-/share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif}"
 export OVERLAY="${OVERLAY:-/scratch/$USER/my_env/overlay-25GB-500K.ext3:ro}"
 export CONDA_ENV="${CONDA_ENV:-am_ssl}"
-export PYTHON_BIN="${PYTHON_BIN:-/scratch/$USER/my_env/conda_envs/${CONDA_ENV}/bin/python}"
+export ENV_PREFIX="${ENV_PREFIX:-/scratch/$USER/my_env/conda_envs/${CONDA_ENV}}"
+export PYTHON_BIN="${PYTHON_BIN:-${ENV_PREFIX}/bin/python}"
 export DATA_DIR="${DATA_DIR:-/scratch/zl6113/active-matter/data}"
 export CHECKPOINT_DIR="${CHECKPOINT_DIR:-/scratch/$USER/active-matter-ssl/runs/ssl}"
 export RUN_NAME="${RUN_NAME:-cfjepa-future-concentrationmask}"
@@ -42,7 +43,7 @@ singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   export XDG_CACHE_HOME='${XDG_CACHE_HOME}'
   export CONDA_NO_PLUGINS=true
   cd /scratch/$USER/active-matter-ssl
-  conda activate '${CONDA_ENV}'
+  conda activate '${ENV_PREFIX}'
   export WANDB_API_KEY=\$(tr -d '\r\n' < ./cache/wandb/api_key)
   export WANDB_ENTITY='${WANDB_ENTITY}'
 

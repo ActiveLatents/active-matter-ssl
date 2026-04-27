@@ -35,10 +35,10 @@ singularity exec --fakeroot --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   cd /scratch/$USER/active-matter-ssl
 
   if [[ ! -x '${PYTHON_BIN}' ]]; then
-    conda create --solver classic -y -n '${CONDA_ENV}' python=3.10
+    conda create --solver classic -y -p '${ENV_PREFIX}' python=3.10
   fi
 
-  conda activate '${CONDA_ENV}'
+  conda activate '${ENV_PREFIX}'
   python -m pip install --upgrade pip
   python -m pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision
   python -m pip install -r requirements.txt

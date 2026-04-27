@@ -16,7 +16,8 @@ mkdir -p logs
 export SIF="${SIF:-/share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif}"
 export OVERLAY="${OVERLAY:-/scratch/$USER/my_env/overlay-25GB-500K.ext3:ro}"
 export CONDA_ENV="${CONDA_ENV:-am_ssl}"
-export PYTHON_BIN="${PYTHON_BIN:-/scratch/$USER/my_env/conda_envs/${CONDA_ENV}/bin/python}"
+export ENV_PREFIX="${ENV_PREFIX:-/scratch/$USER/my_env/conda_envs/${CONDA_ENV}}"
+export PYTHON_BIN="${PYTHON_BIN:-${ENV_PREFIX}/bin/python}"
 export DATA_DIR="${DATA_DIR:-/scratch/zl6113/active-matter/data}"
 export CHECKPOINT_DIR="${CHECKPOINT_DIR:-/scratch/$USER/active-matter-ssl/runs/ssl_latent}"
 export RUN_NAME="${RUN_NAME:-cfjepa-latentfuture-concentrationmask}"
@@ -44,7 +45,7 @@ singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   cd /scratch/$USER/active-matter-ssl
   export WANDB_API_KEY=\$(tr -d '\r\n' < ./cache/wandb/api_key)
   export WANDB_ENTITY='${WANDB_ENTITY}'
-  conda activate '${CONDA_ENV}'
+  conda activate '${ENV_PREFIX}'
 
   ${PYTHON_BIN} -m src.train_ssl \
     --data_dir ${DATA_DIR} \
