@@ -85,6 +85,8 @@ def validate(model, val_loader, device):
     total_future = 0.0
     total_vorticity = 0.0
     total_spectral = 0.0
+    total_latent_kl = 0.0
+    total_action = 0.0
     n_batches = 0
 
     for batch in val_loader:
@@ -99,6 +101,8 @@ def validate(model, val_loader, device):
         total_future += loss_dict["loss_future"].item()
         total_vorticity += loss_dict["loss_vorticity"].item()
         total_spectral += loss_dict["loss_spectral"].item()
+        total_latent_kl += loss_dict["loss_latent_kl"].item()
+        total_action += loss_dict["loss_action"].item()
         n_batches += 1
 
     model.train()
@@ -110,6 +114,8 @@ def validate(model, val_loader, device):
         "val/loss_future": total_future / n_batches,
         "val/loss_vorticity": total_vorticity / n_batches,
         "val/loss_spectral": total_spectral / n_batches,
+        "val/loss_latent_kl": total_latent_kl / n_batches,
+        "val/loss_action": total_action / n_batches,
     }
 
 
@@ -142,6 +148,7 @@ def train(args):
         "predictor_heads": args.predictor_heads,
         "within_mask_ratio": args.within_mask_ratio,
         "mask_strategy": args.mask_strategy,
+        "future_mode": args.future_mode,
         "use_checkpointing": args.use_checkpointing,
         "compile_model": args.compile_model,
         # Loss weights
@@ -151,6 +158,8 @@ def train(args):
         "lambda_sigreg": args.lambda_sigreg,
         "lambda_vorticity": args.lambda_vorticity,
         "lambda_spectral": args.lambda_spectral,
+        "lambda_latent_kl": args.lambda_latent_kl,
+        "lambda_action": args.lambda_action,
         # Training
         "epochs": args.epochs,
         "base_lr": args.base_lr,
@@ -211,6 +220,7 @@ def train(args):
         predictor_heads=args.predictor_heads,
         within_mask_ratio=args.within_mask_ratio,
         mask_strategy=args.mask_strategy,
+        future_mode=args.future_mode,
         use_checkpointing=args.use_checkpointing,
         lambda_within=args.lambda_within,
         lambda_cross=args.lambda_cross,
@@ -218,6 +228,8 @@ def train(args):
         lambda_sigreg=args.lambda_sigreg,
         lambda_vorticity=args.lambda_vorticity,
         lambda_spectral=args.lambda_spectral,
+        lambda_latent_kl=args.lambda_latent_kl,
+        lambda_action=args.lambda_action,
     ).to(device)
 
     if args.compile_model and hasattr(torch, "compile"):
@@ -323,6 +335,8 @@ def train(args):
                     "train/sigreg_total": loss_dict["sigreg_total"].item(),
                     "train/loss_vorticity": loss_dict["loss_vorticity"].item(),
                     "train/loss_spectral": loss_dict["loss_spectral"].item(),
+                    "train/loss_latent_kl": loss_dict["loss_latent_kl"].item(),
+                    "train/loss_action": loss_dict["loss_action"].item(),
                     "train/lr": lr,
                     "train/ema_momentum": ema_momentum,
                     "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
@@ -341,6 +355,8 @@ def train(args):
                         f"future {loss_dict['loss_future'].item():.4f} | "
                         f"vort {loss_dict['loss_vorticity'].item():.4f} | "
                         f"spec {loss_dict['loss_spectral'].item():.4f} | "
+                        f"kl {loss_dict['loss_latent_kl'].item():.4f} | "
+                        f"act {loss_dict['loss_action'].item():.4f} | "
                         f"sigreg {loss_dict['sigreg_total'].item():.2f} | "
                         f"lr {lr:.2e} | "
                         f"grad {grad_norm:.2f}"
@@ -413,6 +429,8 @@ if __name__ == "__main__":
     parser.add_argument("--within_mask_ratio", type=float, default=0.75)
     parser.add_argument("--mask_strategy", type=str, default="random",
                         choices=["random", "concentration"])
+    parser.add_argument("--future_mode", type=str, default="direct",
+                        choices=["direct", "noisy", "latent", "action"])
     parser.add_argument("--use_checkpointing", action="store_true",
                         help="Checkpoint transformer blocks to trade compute for memory")
     parser.add_argument("--compile_model", action="store_true",
@@ -425,6 +443,8 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_sigreg", type=float, default=0.01)
     parser.add_argument("--lambda_vorticity", type=float, default=0.0)
     parser.add_argument("--lambda_spectral", type=float, default=0.0)
+    parser.add_argument("--lambda_latent_kl", type=float, default=0.0)
+    parser.add_argument("--lambda_action", type=float, default=0.0)
 
     # Training
     parser.add_argument("--epochs", type=int, default=100)

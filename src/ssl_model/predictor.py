@@ -53,6 +53,7 @@ class Predictor(nn.Module):
 
         # Project from encoder dim to predictor dim
         self.input_proj = nn.Linear(encoder_dim, predictor_dim)
+        self.cond_proj = nn.Linear(encoder_dim, predictor_dim)
 
         # Learnable mask token
         self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_dim))
@@ -88,8 +89,16 @@ class Predictor(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
-    def forward(self, visible_tokens, visible_indices, masked_indices, total_tokens,
-                pos_ids=None):
+    def forward(
+        self,
+        visible_tokens,
+        visible_indices,
+        masked_indices,
+        total_tokens,
+        pos_ids=None,
+        masked_token_inputs=None,
+        condition=None,
+    ):
         """
         Args:
             visible_tokens:  (B, N_vis, encoder_dim)
@@ -107,8 +116,11 @@ class Predictor(nn.Module):
         # Project visible tokens to predictor dimension
         visible = self.input_proj(visible_tokens)  # (B, N_vis, predictor_dim)
 
-        # Create mask tokens (cast to match visible dtype, e.g. bfloat16 under autocast)
-        mask_tokens = self.mask_token.to(visible.dtype).expand(B, N_mask, -1)
+        # Create mask tokens or use provided noisy latent inputs.
+        if masked_token_inputs is None:
+            mask_tokens = self.mask_token.to(visible.dtype).expand(B, N_mask, -1)
+        else:
+            mask_tokens = self.input_proj(masked_token_inputs.to(visible.dtype))
         
         # Combine visible + mask tokens and restore original ordering
         all_tokens = torch.zeros(
@@ -120,6 +132,10 @@ class Predictor(nn.Module):
         mask_idx = masked_indices.unsqueeze(-1).expand(-1, -1, self.predictor_dim)
         all_tokens.scatter_(1, vis_idx, visible)
         all_tokens.scatter_(1, mask_idx, mask_tokens)
+
+        if condition is not None:
+            cond = self.cond_proj(condition.to(visible.dtype)).unsqueeze(1)
+            all_tokens = all_tokens + cond
 
         # Expand pos_ids to batch: (1, total_tokens, 3) broadcasts across B
         rope = self.rope if pos_ids is not None else None

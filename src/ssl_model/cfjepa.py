@@ -19,6 +19,7 @@ Evaluation flow (linear probe / kNN):
   Encoder encodes ALL tokens, mean-pool to a single representation vector.
 """
 import copy
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -60,6 +61,8 @@ class CFJEPA(nn.Module):
         within_mask_ratio=0.75,
         mask_strategy="random",
         use_checkpointing=False,
+        future_mode="direct",
+        num_diffusion_steps=1000,
         # Loss weights
         lambda_within=1.0,
         lambda_cross=1.0,
@@ -67,20 +70,26 @@ class CFJEPA(nn.Module):
         lambda_sigreg=0.1,
         lambda_vorticity=0.0,
         lambda_spectral=0.0,
+        lambda_latent_kl=0.0,
+        lambda_action=0.0,
     ):
         super().__init__()
 
         self.within_mask_ratio = within_mask_ratio
         self.mask_strategy = mask_strategy
+        self.future_mode = future_mode
         self.lambda_within = lambda_within
         self.lambda_cross = lambda_cross
         self.lambda_future = lambda_future
         self.lambda_sigreg = lambda_sigreg
         self.lambda_vorticity = lambda_vorticity
         self.lambda_spectral = lambda_spectral
+        self.lambda_latent_kl = lambda_latent_kl
+        self.lambda_action = lambda_action
         self.tube_t = tube_t
         self.patch_h = patch_h
         self.patch_w = patch_w
+        self.num_diffusion_steps = num_diffusion_steps
 
         self.patch_embed = ChannelFactoredPatchEmbed(
             embed_dim=embed_dim,
@@ -114,6 +123,62 @@ class CFJEPA(nn.Module):
             use_checkpointing=use_checkpointing,
         )
         self.vorticity_head = nn.Linear(embed_dim, 1)
+        self.future_time_mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 4),
+            nn.SiLU(),
+            nn.Linear(embed_dim * 4, embed_dim),
+        )
+        self.future_prior = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.SiLU(),
+            nn.Linear(embed_dim * 2, embed_dim * 2),
+        )
+        self.future_posterior = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim * 2),
+            nn.SiLU(),
+            nn.Linear(embed_dim * 2, embed_dim * 2),
+        )
+        self.action_infer = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim * 2),
+            nn.SiLU(),
+            nn.Linear(embed_dim * 2, embed_dim),
+        )
+        self.action_transition = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim * 2),
+            nn.SiLU(),
+            nn.Linear(embed_dim * 2, embed_dim),
+        )
+        betas = torch.linspace(1e-4, 0.02, num_diffusion_steps, dtype=torch.float32)
+        alphas = 1.0 - betas
+        alpha_bars = torch.cumprod(alphas, dim=0)
+        self.register_buffer("future_alpha_bars", alpha_bars)
+
+    def _timestep_embedding(self, timesteps, dim, max_period=10000):
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(half, device=timesteps.device) / max(half, 1)
+        )
+        args = timesteps.float().unsqueeze(1) * freqs.unsqueeze(0)
+        emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=-1)
+        return emb
+
+    def _q_sample_future(self, x0, timesteps, noise):
+        alpha_bar = self.future_alpha_bars[timesteps].view(-1, 1, 1)
+        return alpha_bar.sqrt() * x0 + (1.0 - alpha_bar).sqrt() * noise
+
+    def _reparameterize(self, mu, logvar):
+        std = (0.5 * logvar).exp()
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def _kl_normal(self, mu_q, logvar_q, mu_p, logvar_p):
+        return 0.5 * (
+            logvar_p - logvar_q
+            + (logvar_q.exp() + (mu_q - mu_p).square()) / logvar_p.exp().clamp_min(1e-6)
+            - 1.0
+        ).sum(dim=-1).mean()
 
     def _pool_scalar_field_to_tokens(self, field):
         """
@@ -265,6 +330,8 @@ class CFJEPA(nn.Module):
 
         l_future = w_preds.new_zeros(())
         l_spectral = w_preds.new_zeros(())
+        l_latent_kl = w_preds.new_zeros(())
+        l_action = w_preds.new_zeros(())
         if self.lambda_future > 0:
             split_t = grid_shape[0] // 2
             context_ids = torch.nonzero(pos_ids[:, 0] < split_t, as_tuple=False).squeeze(-1)
@@ -275,17 +342,72 @@ class CFJEPA(nn.Module):
             f_visible_tokens = self._gather_tokens(all_tokens, f_vis_ids)
             f_pos_ids = pos_ids[f_vis_ids]
             f_encoder_out = self.encoder(f_visible_tokens, pos_ids=f_pos_ids)
-            f_preds = self.predictor(
-                visible_tokens=f_encoder_out,
-                visible_indices=f_vis_ids,
-                masked_indices=f_mask_ids,
-                total_tokens=N_total,
-                pos_ids=pos_ids,
-            )
             f_targets = F.normalize(
                 self._gather_tokens(full_target_out, f_mask_ids).float(), dim=-1
             )
-            l_future = prediction_loss(f_preds, f_targets)
+            context_summary = f_encoder_out.mean(dim=1)
+            future_summary = f_targets.mean(dim=1)
+            if self.future_mode == "noisy":
+                timesteps = torch.randint(
+                    0, self.num_diffusion_steps, (B,), device=device, dtype=torch.long
+                )
+                noise = torch.randn_like(f_targets)
+                noisy_future = self._q_sample_future(f_targets, timesteps, noise)
+                cond = self.future_time_mlp(self._timestep_embedding(timesteps, D))
+                f_preds = self.predictor(
+                    visible_tokens=f_encoder_out,
+                    visible_indices=f_vis_ids,
+                    masked_indices=f_mask_ids,
+                    total_tokens=N_total,
+                    pos_ids=pos_ids,
+                    masked_token_inputs=noisy_future,
+                    condition=cond,
+                )
+                l_future = prediction_loss(f_preds, f_targets)
+            elif self.future_mode == "latent":
+                prior_stats = self.future_prior(context_summary)
+                mu_p, logvar_p = prior_stats.chunk(2, dim=-1)
+                post_stats = self.future_posterior(
+                    torch.cat([context_summary, future_summary], dim=-1)
+                )
+                mu_q, logvar_q = post_stats.chunk(2, dim=-1)
+                z = self._reparameterize(mu_q, logvar_q)
+                f_preds = self.predictor(
+                    visible_tokens=f_encoder_out,
+                    visible_indices=f_vis_ids,
+                    masked_indices=f_mask_ids,
+                    total_tokens=N_total,
+                    pos_ids=pos_ids,
+                    condition=z,
+                )
+                l_future = prediction_loss(f_preds, f_targets)
+                l_latent_kl = self._kl_normal(mu_q, logvar_q, mu_p, logvar_p)
+            elif self.future_mode == "action":
+                action_code = self.action_infer(
+                    torch.cat([context_summary, future_summary], dim=-1)
+                )
+                f_preds = self.predictor(
+                    visible_tokens=f_encoder_out,
+                    visible_indices=f_vis_ids,
+                    masked_indices=f_mask_ids,
+                    total_tokens=N_total,
+                    pos_ids=pos_ids,
+                    condition=action_code,
+                )
+                l_future = prediction_loss(f_preds, f_targets)
+                pooled_future_pred = self.action_transition(
+                    torch.cat([context_summary, action_code], dim=-1)
+                )
+                l_action = F.mse_loss(pooled_future_pred, future_summary)
+            else:
+                f_preds = self.predictor(
+                    visible_tokens=f_encoder_out,
+                    visible_indices=f_vis_ids,
+                    masked_indices=f_mask_ids,
+                    total_tokens=N_total,
+                    pos_ids=pos_ids,
+                )
+                l_future = prediction_loss(f_preds, f_targets)
 
             if self.lambda_vorticity > 0:
                 l_vorticity = (2.0 * l_vorticity + self._vorticity_loss_for_predictions(
@@ -323,6 +445,8 @@ class CFJEPA(nn.Module):
             + self.lambda_sigreg * l_sigreg
             + self.lambda_vorticity * l_vorticity
             + self.lambda_spectral * l_spectral
+            + self.lambda_latent_kl * l_latent_kl
+            + self.lambda_action * l_action
         )
 
         loss_dict = {
@@ -333,6 +457,8 @@ class CFJEPA(nn.Module):
             "sigreg_total": l_sigreg.detach(),
             "loss_vorticity": l_vorticity.detach(),
             "loss_spectral": l_spectral.detach(),
+            "loss_latent_kl": l_latent_kl.detach(),
+            "loss_action": l_action.detach(),
         }
 
         return total_loss, loss_dict
