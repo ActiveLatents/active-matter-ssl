@@ -22,7 +22,6 @@ export DATA_DIR="${DATA_DIR:-/scratch/zl6113/active-matter/data}"
 export CHECKPOINT_DIR="${CHECKPOINT_DIR:-/scratch/$USER/active-matter-ssl/runs/ssl_action}"
 export RUN_NAME="${RUN_NAME:-cfjepa-actionfuture-concentrationmask}"
 export WANDB_PROJECT="${WANDB_PROJECT:-dl_project_sst}"
-export WANDB_ENTITY="${WANDB_ENTITY:-team_active_matter}"
 export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-/scratch/$USER/my_env/conda_pkgs}"
 export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-/scratch/$USER/my_env/conda_envs}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/scratch/$USER/my_env/pip_cache}"
@@ -44,7 +43,6 @@ singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   export CONDA_NO_PLUGINS=true
   cd /scratch/$USER/active-matter-ssl
   export WANDB_API_KEY=\$(tr -d '\r\n' < /scratch/$USER/.cache/wandb/api_key)
-  export WANDB_ENTITY='${WANDB_ENTITY}'
   conda activate '${ENV_PREFIX}'
 
   ${PYTHON_BIN} -m src.train_ssl \
