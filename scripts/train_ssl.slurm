@@ -24,7 +24,7 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
         python -m src.train_ssl \
             --data_dir /scratch/sk12590/dl_project_data/data \
             --n_frames 16 \
-            --train_stride 2 \
+            --train_stride 1 \
             --val_stride 1 \
             --batch_size 6 \
             --num_workers 4 \
@@ -35,10 +35,10 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --predictor_depth 4 \
             --predictor_heads 6 \
             --within_mask_ratio 0.75 \
-            --lambda_within 1.0 \
+            --lambda_within 0.0 \
             --lambda_cross 1.0 \
             --lambda_sigreg 1.0 \
-            --epochs 50 \
+            --epochs 30 \
             --base_lr 1.5e-4 \
             --weight_decay 0.05 \
             --warmup_epochs 10 \
@@ -46,6 +46,6 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --log_every 50 \
             --val_every 5 \
             --wandb_project active-matter-ssl \
-            --run_name cfjepa-v7_ema_and_sigreg \
+            --run_name cfjepa-ablation-within_field \
             --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl
         "
