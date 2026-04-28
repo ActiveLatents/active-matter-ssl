@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .patch_embed import ChannelFactoredPatchEmbed
+from .patch_embed import ChannelFactoredPatchEmbed, SinglePatchEmbed
 from .encoder import ViTEncoder
 from .predictor import Predictor
 from .masking import generate_masks, batch_mask_indices
@@ -57,6 +57,8 @@ class CFJEPA(nn.Module):
         lambda_within=1.0,
         lambda_cross=1.0,
         lambda_sigreg=0.1,
+        # Ablation: set False to use a single shared patch embedding
+        use_channel_factored=True,
     ):
         super().__init__()
 
@@ -64,15 +66,16 @@ class CFJEPA(nn.Module):
         self.lambda_within = lambda_within
         self.lambda_cross = lambda_cross
         self.lambda_sigreg = lambda_sigreg
+        self.use_channel_factored = use_channel_factored
 
-        self.patch_embed = ChannelFactoredPatchEmbed(
-            embed_dim=embed_dim,
-            tube_t=tube_t,
-            patch_h=patch_h,
-            patch_w=patch_w,
-            n_frames=n_frames,
-            spatial_size=spatial_size,
+        embed_kwargs = dict(
+            embed_dim=embed_dim, tube_t=tube_t, patch_h=patch_h, patch_w=patch_w,
+            n_frames=n_frames, spatial_size=spatial_size,
         )
+        if use_channel_factored:
+            self.patch_embed = ChannelFactoredPatchEmbed(**embed_kwargs)
+        else:
+            self.patch_embed = SinglePatchEmbed(**embed_kwargs)
 
         self.encoder = ViTEncoder(
             embed_dim=embed_dim,
@@ -163,37 +166,44 @@ class CFJEPA(nn.Module):
             self._gather_tokens(full_target_out, w_mask_ids).float(), dim=-1
         )
 
-        # ── Cross-field online pass ─────────────────────────────────────
-        c_vis_ids  = batch_mask_indices(cross_masks["visible_ids"], B)
-        c_mask_ids = batch_mask_indices(cross_masks["masked_ids"],  B)
+        # ── Cross-field online pass (channel-factored only) ────────────
+        # With a single patch embed there is only one token group, so
+        # cross-field masking is undefined — skip it and zero the loss.
+        if self.use_channel_factored:
+            c_vis_ids  = batch_mask_indices(cross_masks["visible_ids"], B)
+            c_mask_ids = batch_mask_indices(cross_masks["masked_ids"],  B)
 
-        c_visible_tokens = self._gather_tokens(all_tokens, c_vis_ids)
-        c_pos_ids = pos_ids[c_vis_ids]
-        c_encoder_out    = self.encoder(c_visible_tokens, pos_ids=c_pos_ids)
+            c_visible_tokens = self._gather_tokens(all_tokens, c_vis_ids)
+            c_pos_ids = pos_ids[c_vis_ids]
+            c_encoder_out    = self.encoder(c_visible_tokens, pos_ids=c_pos_ids)
 
-        c_preds   = self.predictor(
-            visible_tokens=c_encoder_out,
-            visible_indices=c_vis_ids,
-            masked_indices=c_mask_ids,
-            total_tokens=N_total,
-            pos_ids=pos_ids,
-        )
-        c_targets = F.normalize(
-            self._gather_tokens(full_target_out, c_mask_ids).float(), dim=-1
-        )
+            c_preds   = self.predictor(
+                visible_tokens=c_encoder_out,
+                visible_indices=c_vis_ids,
+                masked_indices=c_mask_ids,
+                total_tokens=N_total,
+                pos_ids=pos_ids,
+            )
+            c_targets = F.normalize(
+                self._gather_tokens(full_target_out, c_mask_ids).float(), dim=-1
+            )
+            l_cross = prediction_loss(c_preds, c_targets)
+        else:
+            l_cross = torch.tensor(0.0, device=device)
 
         # ── Losses ─────────────────────────────────────────────────────
         l_within = prediction_loss(w_preds, w_targets)
-        l_cross  = prediction_loss(c_preds, c_targets)
 
-        # SIGReg equally weighted over within-field and cross-field predictor
-        # outputs. Subsample each independently to keep O(N^2) within memory.
+        # SIGReg over within-field predictor outputs (+ cross if available).
         n_w = min(1024, w_preds.shape[1])
-        n_c = min(1024, c_preds.shape[1])
         idx_w = torch.randperm(w_preds.shape[1], device=device)[:n_w]
-        idx_c = torch.randperm(c_preds.shape[1], device=device)[:n_c]
-        l_sigreg = 0.5 * sigreg_loss(w_preds[:, idx_w, :]) \
-                 + 0.5 * sigreg_loss(c_preds[:, idx_c, :])
+        if self.use_channel_factored:
+            n_c = min(1024, c_preds.shape[1])
+            idx_c = torch.randperm(c_preds.shape[1], device=device)[:n_c]
+            l_sigreg = 0.5 * sigreg_loss(w_preds[:, idx_w, :]) \
+                     + 0.5 * sigreg_loss(c_preds[:, idx_c, :])
+        else:
+            l_sigreg = sigreg_loss(w_preds[:, idx_w, :])
 
         total_loss = (
             self.lambda_within  * l_within
@@ -244,8 +254,9 @@ class CFJEPA(nn.Module):
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total     = sum(p.numel() for p in self.parameters())
 
+        embed_label = "patch_embed(CF)" if self.use_channel_factored else "patch_embed(single)"
         components = {
-            "patch_embed":    self.patch_embed,
+            embed_label:      self.patch_embed,
             "encoder":        self.encoder,
             "predictor":      self.predictor,
             "target_encoder": self.target_encoder,

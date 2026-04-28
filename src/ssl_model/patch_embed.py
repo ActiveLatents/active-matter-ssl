@@ -188,6 +188,86 @@ class ChannelFactoredPatchEmbed(nn.Module):
         return all_tokens, field_indices, grid_shape, pos_ids
 
 
+# ── Single shared patch embedding (ablation) ────────────────────────────────
+
+class SinglePatchEmbed(nn.Module):
+    """
+    Ablation: one 3D conv over all 11 channels concatenated.
+
+    No per-field-group projections or identity embeddings — the model
+    must discover field structure from raw channel layout alone.
+
+    Interface is identical to ChannelFactoredPatchEmbed so CFJEPA can
+    swap between the two without any other changes.
+    """
+
+    TOTAL_CHANNELS = 11
+    GROUP_NAMES = ["concentration", "velocity", "orientation", "strain_rate"]
+
+    def __init__(
+        self,
+        embed_dim=384,
+        tube_t=2,
+        patch_h=16,
+        patch_w=16,
+        n_frames=16,
+        spatial_size=256,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_t = n_frames // tube_t
+        self.n_h = spatial_size // patch_h
+        self.n_w = spatial_size // patch_w
+
+        self.proj = nn.Conv3d(
+            self.TOTAL_CHANNELS,
+            embed_dim,
+            kernel_size=(tube_t, patch_h, patch_w),
+            stride=(tube_t, patch_h, patch_w),
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.trunc_normal_(self.proj.weight, std=0.02)
+        nn.init.zeros_(self.proj.bias)
+
+    def _make_pos_ids(self, device):
+        t = torch.arange(self.n_t, device=device)
+        h = torch.arange(self.n_h, device=device)
+        w = torch.arange(self.n_w, device=device)
+        grid_t, grid_h, grid_w = torch.meshgrid(t, h, w, indexing="ij")
+        return torch.stack([grid_t.flatten(), grid_h.flatten(), grid_w.flatten()], dim=-1)
+
+    def forward(self, field_dict):
+        """
+        Args:
+            field_dict: dict with keys matching GROUP_NAMES,
+                        each value is (B, T, C_field, H, W)
+        Returns:
+            all_tokens:    (B, N, embed_dim)
+            field_indices: {"all": (0, N)}  — single group covering all tokens
+            grid_shape:    (n_t, n_h, n_w)
+            pos_ids:       (N, 3)
+        """
+        device = next(iter(field_dict.values())).device
+
+        # Concat all fields along channel dim → (B, T, 11, H, W)
+        x = torch.cat([field_dict[name] for name in self.GROUP_NAMES], dim=2)
+
+        # Conv3d expects (B, C, T, H, W)
+        x = x.permute(0, 2, 1, 3, 4)
+        tokens = self.proj(x)                          # (B, D, n_t, n_h, n_w)
+        grid_shape = (tokens.shape[2], tokens.shape[3], tokens.shape[4])
+        tokens = tokens.flatten(2).transpose(1, 2)     # (B, N, D)
+
+        N = tokens.shape[1]
+        field_indices = {"all": (0, N)}
+        pos_ids = self._make_pos_ids(device)           # (N, 3)
+
+        return tokens, field_indices, grid_shape, pos_ids
+
+
 # ── Quick test ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

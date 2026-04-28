@@ -132,6 +132,8 @@ def train(args):
         "lambda_within": args.lambda_within,
         "lambda_cross": args.lambda_cross,
         "lambda_sigreg": args.lambda_sigreg,
+        # Ablation
+        "use_channel_factored": not args.single_patch_embed,
         # Training
         "epochs": args.epochs,
         "base_lr": args.base_lr,
@@ -192,6 +194,7 @@ def train(args):
         lambda_within=args.lambda_within,
         lambda_cross=args.lambda_cross,
         lambda_sigreg=args.lambda_sigreg,
+        use_channel_factored=not args.single_patch_embed,
     ).to(device)
 
     model.param_count()
@@ -374,6 +377,9 @@ if __name__ == "__main__":
     parser.add_argument("--predictor_depth", type=int, default=4)
     parser.add_argument("--predictor_heads", type=int, default=6)
     parser.add_argument("--within_mask_ratio", type=float, default=0.75)
+    parser.add_argument("--single_patch_embed", action="store_true",
+                        help="Ablation: use one shared 3D conv over all 11 channels "
+                             "instead of per-field-group embeddings")
 
     # Loss weights
     parser.add_argument("--lambda_within", type=float, default=1.0)

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cfjepa-ssl
+#SBATCH --job-name=cfjepa-single-embed
 #SBATCH --account=csci_ga_2572-2026sp
 #SBATCH --partition=c12m85-a100-1
 #SBATCH --gres=gpu:1
@@ -46,6 +46,7 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --log_every 50 \
             --val_every 5 \
             --wandb_project active-matter-ssl \
-            --run_name cfjepa-ablation-within_field \
-            --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl
+            --run_name cfjepa-ablation-single-patch-embed \
+            --single_patch_embed \
+            --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl_single_embed
         "
