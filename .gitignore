@@ -8,3 +8,5 @@ checkpoints/
 *.pt
 *.pth
 .DS_Store
+logs/
+runs/
