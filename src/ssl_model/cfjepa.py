@@ -1,22 +1,23 @@
 # src/ssl_model/cfjepa.py
 
 """
-Channel-Factored JEPA (CF-JEPA).
+Channel-Factored JEPA — Temporal Frame Prediction.
 
 Training flow:
-  1. Patch embedding → all tokens
-  2. Encoder(all tokens) → prediction targets  (no stop-gradient, no EMA)
-  3. Generate within-field and cross-field spatiotemporal block masks
-  4. Two encoder passes on VISIBLE tokens
-  5. Predictor reconstructs masked target representations
-  6. Loss = prediction loss (normalized MSE) + per-sample SIGReg
-
-SIGReg is the sole anti-collapse mechanism. It forces each sample's token
-representations to be Gaussian-distributed, making collapse impossible
-regardless of how gradients flow — no stop-gradient or EMA heuristics needed.
+  1. Split the T-frame input into context (first T/2 frames) and
+     target (last T/2 frames).
+  2. Embed each half independently with the shared patch embedding.
+     Target tokens get their temporal pos_ids shifted by n_t_half so
+     that 3D RoPE encodes the correct absolute time position.
+  3. Online encoder processes context tokens only.
+  4. Target encoder (EMA) processes target tokens under no_grad.
+  5. Predictor attends over context encoder output + learnable query
+     tokens at target positions, and predicts the target representations.
+  6. Loss = prediction loss (normalized MSE) + SIGReg on predictor output.
 
 Evaluation flow (linear probe / kNN):
-  Encoder encodes ALL tokens, mean-pool to a single representation vector.
+  Encoder encodes ALL tokens from the full sequence, mean-pooled to a
+  single representation vector.
 """
 import copy
 import torch
@@ -26,7 +27,6 @@ import torch.nn.functional as F
 from .patch_embed import ChannelFactoredPatchEmbed
 from .encoder import ViTEncoder
 from .predictor import Predictor
-from .masking import generate_masks, batch_mask_indices
 from .losses import prediction_loss, sigreg_loss
 
 
@@ -51,18 +51,11 @@ class CFJEPA(nn.Module):
         predictor_dim=192,
         predictor_depth=4,
         predictor_heads=6,
-        # Masking
-        within_mask_ratio=0.75,
         # Loss weights
-        lambda_within=1.0,
-        lambda_cross=1.0,
         lambda_sigreg=0.1,
     ):
         super().__init__()
 
-        self.within_mask_ratio = within_mask_ratio
-        self.lambda_within = lambda_within
-        self.lambda_cross = lambda_cross
         self.lambda_sigreg = lambda_sigreg
 
         self.patch_embed = ChannelFactoredPatchEmbed(
@@ -95,145 +88,115 @@ class CFJEPA(nn.Module):
             mlp_ratio=mlp_ratio,
         )
 
-    def _gather_tokens(self, tokens, indices):
-        """
-        tokens:  (B, N, D)
-        indices: (B, K)
-        returns: (B, K, D)
-        """
-        D = tokens.shape[-1]
-        idx = indices.unsqueeze(-1).expand(-1, -1, D)
-        return torch.gather(tokens, 1, idx)
+    def _split_field_dict(self, field_dict):
+        """Split each field tensor at T//2 into context and target halves."""
+        ctx, tgt = {}, {}
+        for k, v in field_dict.items():
+            half = v.shape[1] // 2
+            ctx[k] = v[:, :half]
+            tgt[k] = v[:, half:]
+        return ctx, tgt
 
     def forward_ssl(self, field_dict):
         """
         SSL training forward pass.
 
-        The encoder runs on all tokens to produce prediction targets, and also
-        on visible-only subsets for the online passes. Gradients flow freely
-        through all paths. SIGReg on the online encoder outputs is the only
-        anti-collapse mechanism.
-
         Args:
             field_dict: dict with keys (concentration, velocity, orientation,
-                        strain_rate), each (B, T, C_field, H, W)
+                        strain_rate), each (B, T, C_field, H, W).
+                        T must be even.
 
         Returns:
             total_loss: scalar
-            loss_dict:  dict of all loss components
+            loss_dict:  dict of loss components
         """
         device = next(self.parameters()).device
 
-        # 1. Patch embedding
-        all_tokens, field_indices, grid_shape, pos_ids = self.patch_embed(field_dict)
-        B, N_total, D = all_tokens.shape
+        # 1. Split into context (first half) and target (second half)
+        ctx_dict, tgt_dict = self._split_field_dict(field_dict)
 
-        # 2. Generate spatiotemporal block masks
-        within_masks, cross_masks = generate_masks(
-            field_indices,
-            grid_shape=grid_shape,
-            within_mask_ratio=self.within_mask_ratio,
-            device=device,
-        )
+        # 2. Embed each half. Both halves have the same spatial grid shape.
+        #    pos_ids from patch_embed always start at t=0, so shift the
+        #    target pos_ids by n_t_half to encode absolute temporal position.
+        ctx_tokens, _, grid_shape, pos_ids_ctx = self.patch_embed(ctx_dict)
+        tgt_tokens, _, _,          pos_ids_tgt = self.patch_embed(tgt_dict)
 
-        # 3. Target pass: full encoder on all tokens.
-        # pos_ids: (N_total, 3) → expand to (B, N_total, 3) for encoder
-        full_pos_ids = pos_ids.unsqueeze(0).expand(B, -1, -1)
+        n_t_half = grid_shape[0]  # number of temporal tube steps per half
+        pos_ids_tgt = pos_ids_tgt.clone()
+        pos_ids_tgt[:, 0] += n_t_half  # shift t coords into the second half
+
+        B = ctx_tokens.shape[0]
+        N_ctx = ctx_tokens.shape[1]
+        N_tgt = tgt_tokens.shape[1]
+        N_total = N_ctx + N_tgt
+
+        # Full pos_ids covering both halves (used by predictor for RoPE)
+        pos_ids_full = torch.cat([pos_ids_ctx, pos_ids_tgt], dim=0)  # (N_total, 3)
+
+        # 3. Online encoder: context frames only
+        ctx_pos = pos_ids_ctx.unsqueeze(0).expand(B, -1, -1)
+        ctx_enc = self.encoder(ctx_tokens, pos_ids=ctx_pos)  # (B, N_ctx, D)
+
+        # 4. Target encoder: second-half frames (no gradient)
+        tgt_pos = pos_ids_tgt.unsqueeze(0).expand(B, -1, -1)
         with torch.no_grad():
-            full_target_out = self.target_encoder(all_tokens, pos_ids=full_pos_ids)
+            tgt_enc = self.target_encoder(tgt_tokens, pos_ids=tgt_pos)  # (B, N_tgt, D)
+        tgt_targets = F.normalize(tgt_enc.float(), dim=-1)
 
+        # 5. Predictor: context tokens are "visible", target positions are queries
+        vis_ids = torch.arange(N_ctx, device=device).unsqueeze(0).expand(B, -1)
+        tgt_ids = torch.arange(N_ctx, N_total, device=device).unsqueeze(0).expand(B, -1)
 
-        # ── Within-field online pass ────────────────────────────────────
-        w_vis_ids  = batch_mask_indices(within_masks["visible_ids"], B)
-        w_mask_ids = batch_mask_indices(within_masks["masked_ids"],  B)
-
-        w_visible_tokens = self._gather_tokens(all_tokens, w_vis_ids)
-        # Gather pos_ids for visible token subset: (B, N_vis, 3)
-        w_pos_ids = pos_ids[w_vis_ids]
-        w_encoder_out    = self.encoder(w_visible_tokens, pos_ids=w_pos_ids)
-
-        w_preds   = self.predictor(
-            visible_tokens=w_encoder_out,
-            visible_indices=w_vis_ids,
-            masked_indices=w_mask_ids,
+        preds = self.predictor(
+            visible_tokens=ctx_enc,
+            visible_indices=vis_ids,
+            masked_indices=tgt_ids,
             total_tokens=N_total,
-            pos_ids=pos_ids,
-        )
-        w_targets = F.normalize(
-            self._gather_tokens(full_target_out, w_mask_ids).float(), dim=-1
-        )
+            pos_ids=pos_ids_full,
+        )  # (B, N_tgt, D)
 
-        # ── Cross-field online pass ─────────────────────────────────────
-        c_vis_ids  = batch_mask_indices(cross_masks["visible_ids"], B)
-        c_mask_ids = batch_mask_indices(cross_masks["masked_ids"],  B)
+        # 6. Losses
+        l_pred = prediction_loss(preds, tgt_targets)
 
-        c_visible_tokens = self._gather_tokens(all_tokens, c_vis_ids)
-        c_pos_ids = pos_ids[c_vis_ids]
-        c_encoder_out    = self.encoder(c_visible_tokens, pos_ids=c_pos_ids)
+        n_sub = min(1024, preds.shape[1])
+        idx = torch.randperm(preds.shape[1], device=device)[:n_sub]
+        l_sigreg = sigreg_loss(preds[:, idx, :])
 
-        c_preds   = self.predictor(
-            visible_tokens=c_encoder_out,
-            visible_indices=c_vis_ids,
-            masked_indices=c_mask_ids,
-            total_tokens=N_total,
-            pos_ids=pos_ids,
-        )
-        c_targets = F.normalize(
-            self._gather_tokens(full_target_out, c_mask_ids).float(), dim=-1
-        )
-
-        # ── Losses ─────────────────────────────────────────────────────
-        l_within = prediction_loss(w_preds, w_targets)
-        l_cross  = prediction_loss(c_preds, c_targets)
-
-        # SIGReg equally weighted over within-field and cross-field predictor
-        # outputs. Subsample each independently to keep O(N^2) within memory.
-        n_w = min(1024, w_preds.shape[1])
-        n_c = min(1024, c_preds.shape[1])
-        idx_w = torch.randperm(w_preds.shape[1], device=device)[:n_w]
-        idx_c = torch.randperm(c_preds.shape[1], device=device)[:n_c]
-        l_sigreg = 0.5 * sigreg_loss(w_preds[:, idx_w, :]) \
-                 + 0.5 * sigreg_loss(c_preds[:, idx_c, :])
-
-        total_loss = (
-            self.lambda_within  * l_within
-            + self.lambda_cross * l_cross
-            + self.lambda_sigreg * l_sigreg
-        )
+        total_loss = l_pred + self.lambda_sigreg * l_sigreg
 
         loss_dict = {
-            "loss_total":   total_loss.detach(),
-            "loss_within":  l_within.detach(),
-            "loss_cross":   l_cross.detach(),
-            "sigreg_total": l_sigreg.detach(),
+            "loss_total":  total_loss.detach(),
+            "loss_pred":   l_pred.detach(),
+            "sigreg":      l_sigreg.detach(),
         }
 
         return total_loss, loss_dict
 
     @torch.no_grad()
     def update_target_encoder(self, momentum):
-        """Updates the target encoder via exponential moving average."""
-        for param, target_param in zip(self.encoder.parameters(), self.target_encoder.parameters()):
+        """EMA update of target encoder."""
+        for param, target_param in zip(self.encoder.parameters(),
+                                       self.target_encoder.parameters()):
             target_param.data.mul_(momentum).add_(param.data, alpha=1.0 - momentum)
 
     @torch.no_grad()
-    def encode(self, field_dict, pool="mean", use_target_encoder=False):
+    def encode(self, field_dict, pool="mean"):
         """
         Extract representations for evaluation (linear probe / kNN).
 
-        Args:
-            field_dict:          dict with field group tensors
-            pool:                "mean" for mean pooling over all tokens
-            use_target_encoder:  if True, use EMA target encoder instead of online encoder
+        Only the context half (first T//2 frames) is encoded, matching the
+        distribution the online encoder saw during training. Using all T frames
+        would expose the encoder to temporal positions it never processed during
+        training (the target half was only ever seen by the target encoder).
 
         Returns:
             features: (B, embed_dim)
         """
-        encoder = self.target_encoder if use_target_encoder else self.encoder
-        all_tokens, _, _, pos_ids = self.patch_embed(field_dict)
-        B = all_tokens.shape[0]
-        full_pos_ids = pos_ids.unsqueeze(0).expand(B, -1, -1)
-        encoder_out = encoder(all_tokens, pos_ids=full_pos_ids)
+        ctx_dict, _ = self._split_field_dict(field_dict)
+        ctx_tokens, _, _, pos_ids_ctx = self.patch_embed(ctx_dict)
+        B = ctx_tokens.shape[0]
+        ctx_pos = pos_ids_ctx.unsqueeze(0).expand(B, -1, -1)
+        encoder_out = self.encoder(ctx_tokens, pos_ids=ctx_pos)
 
         if pool == "mean":
             return encoder_out.mean(dim=1)
@@ -268,7 +231,6 @@ if __name__ == "__main__":
         n_frames=16, spatial_size=256,
         encoder_depth=12, encoder_heads=6,
         predictor_dim=192, predictor_depth=4, predictor_heads=6,
-        within_mask_ratio=0.75,
     )
 
     print("Parameter counts:")
@@ -288,6 +250,6 @@ if __name__ == "__main__":
     for k, v in loss_dict.items():
         print(f"  {k}: {v:.4f}")
 
-    print("\nEvaluation encode...")
+    print("\nEvaluation encode (context half only)...")
     features = model.encode(field_dict)
     print(f"Features: {features.shape}")  # (2, 384)

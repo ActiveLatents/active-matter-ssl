@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cfjepa-ssl
+#SBATCH --job-name=cfjepa-ssl-frame-pred
 #SBATCH --account=csci_ga_2572-2026sp
 #SBATCH --partition=c12m85-a100-1
 #SBATCH --gres=gpu:1
@@ -34,9 +34,6 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --predictor_dim 192 \
             --predictor_depth 4 \
             --predictor_heads 6 \
-            --within_mask_ratio 0.75 \
-            --lambda_within 1.0 \
-            --lambda_cross 1.0 \
             --lambda_sigreg 1.0 \
             --epochs 50 \
             --base_lr 1.5e-4 \
@@ -46,6 +43,6 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --log_every 50 \
             --val_every 5 \
             --wandb_project active-matter-ssl \
-            --run_name cfjepa-v7_ema_and_sigreg \
-            --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl
+            --run_name cfjepa-frame-prediction \
+            --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl_frame_pred
         "

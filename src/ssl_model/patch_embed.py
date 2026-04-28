@@ -130,19 +130,18 @@ class ChannelFactoredPatchEmbed(nn.Module):
         for name in self.GROUP_NAMES:
             nn.init.trunc_normal_(self.field_embed[name], std=0.02)
 
-    def _make_pos_ids(self, device):
+    def _make_pos_ids(self, n_t, n_h, n_w, device):
         """
         Return (t, h, w) grid indices for every token in one field group.
 
-        Token ordering matches TubeletEmbedding: Conv3d output is
-        (B, D, n_t, n_h, n_w), flattened in row-major order so w varies
-        fastest, then h, then t.
+        Takes actual grid dimensions from the conv output so this works
+        correctly for any input length (full sequence or half-sequence).
 
-        Returns: (tokens_per_group, 3)  — same for every group and batch item
+        Returns: (n_t * n_h * n_w, 3)
         """
-        t = torch.arange(self.n_t, device=device)
-        h = torch.arange(self.n_h, device=device)
-        w = torch.arange(self.n_w, device=device)
+        t = torch.arange(n_t, device=device)
+        h = torch.arange(n_h, device=device)
+        w = torch.arange(n_w, device=device)
         grid_t, grid_h, grid_w = torch.meshgrid(t, h, w, indexing="ij")
         return torch.stack([grid_t.flatten(), grid_h.flatten(), grid_w.flatten()], dim=-1)
 
@@ -154,7 +153,7 @@ class ChannelFactoredPatchEmbed(nn.Module):
         Returns:
             all_tokens:    (B, total_tokens, embed_dim)
             field_indices: dict mapping group name to (start_idx, end_idx)
-            grid_shape:    (n_t, n_h, n_w) tuple
+            grid_shape:    (n_t, n_h, n_w) tuple — actual dims from conv output
             pos_ids:       (total_tokens, 3) — (t, h, w) index per token,
                            shared across all batches and field groups
         """
@@ -162,15 +161,12 @@ class ChannelFactoredPatchEmbed(nn.Module):
         all_tokens = []
         field_indices = {}
         offset = 0
-
-        group_pos = self._make_pos_ids(device)  # (tokens_per_group, 3)
+        grid_shape = None
 
         for name in self.GROUP_NAMES:
             x = field_dict[name]
             tokens, grid_shape = self.embeds[name](x)
 
-            # Only field-type identity is added here; spatial/temporal
-            # position is handled by 3D RoPE inside the transformer.
             tokens = tokens + self.field_embed[name]
 
             n_tokens = tokens.shape[1]
@@ -181,7 +177,10 @@ class ChannelFactoredPatchEmbed(nn.Module):
 
         all_tokens = torch.cat(all_tokens, dim=1)  # (B, total_tokens, embed_dim)
 
-        # Replicate pos_ids for each field group (same grid for all groups)
+        # Build pos_ids from the actual conv output shape, not self.n_t.
+        # This handles both full-sequence (eval) and half-sequence (training) calls.
+        n_t, n_h, n_w = grid_shape
+        group_pos = self._make_pos_ids(n_t, n_h, n_w, device)  # (tokens_per_group, 3)
         n_groups = len(self.GROUP_NAMES)
         pos_ids = group_pos.repeat(n_groups, 1)  # (total_tokens, 3)
 

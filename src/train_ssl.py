@@ -80,8 +80,7 @@ def load_checkpoint(path, model, optimizer, scaler, device):
 def validate(model, val_loader, device):
     model.eval()
     total_loss = 0.0
-    total_within = 0.0
-    total_cross = 0.0
+    total_pred = 0.0
     n_batches = 0
 
     for batch in val_loader:
@@ -91,16 +90,14 @@ def validate(model, val_loader, device):
             loss, loss_dict = model.forward_ssl(field_dict)
 
         total_loss += loss.item()
-        total_within += loss_dict["loss_within"].item()
-        total_cross += loss_dict["loss_cross"].item()
+        total_pred += loss_dict["loss_pred"].item()
         n_batches += 1
 
     model.train()
 
     return {
         "val/loss": total_loss / n_batches,
-        "val/loss_within": total_within / n_batches,
-        "val/loss_cross": total_cross / n_batches,
+        "val/loss_pred": total_pred / n_batches,
     }
 
 
@@ -127,10 +124,7 @@ def train(args):
         "predictor_dim": args.predictor_dim,
         "predictor_depth": args.predictor_depth,
         "predictor_heads": args.predictor_heads,
-        "within_mask_ratio": args.within_mask_ratio,
         # Loss weights
-        "lambda_within": args.lambda_within,
-        "lambda_cross": args.lambda_cross,
         "lambda_sigreg": args.lambda_sigreg,
         # Training
         "epochs": args.epochs,
@@ -188,9 +182,6 @@ def train(args):
         predictor_dim=args.predictor_dim,
         predictor_depth=args.predictor_depth,
         predictor_heads=args.predictor_heads,
-        within_mask_ratio=args.within_mask_ratio,
-        lambda_within=args.lambda_within,
-        lambda_cross=args.lambda_cross,
         lambda_sigreg=args.lambda_sigreg,
     ).to(device)
 
@@ -287,9 +278,8 @@ def train(args):
             if global_step % args.log_every == 0:
                 log_dict = {
                     "train/loss": loss.item(),
-                    "train/loss_within": loss_dict["loss_within"].item(),
-                    "train/loss_cross": loss_dict["loss_cross"].item(),
-                    "train/sigreg_total": loss_dict["sigreg_total"].item(),
+                    "train/loss_pred": loss_dict["loss_pred"].item(),
+                    "train/sigreg": loss_dict["sigreg"].item(),
                     "train/lr": lr,
                     "train/ema_momentum": ema_momentum,
                     "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
@@ -303,9 +293,8 @@ def train(args):
                     f"  [{epoch+1}/{args.epochs}] "
                     f"step {global_step} | "
                     f"loss {loss.item():.4f} | "
-                    f"within {loss_dict['loss_within'].item():.4f} | "
-                    f"cross {loss_dict['loss_cross'].item():.4f} | "
-                    f"sigreg {loss_dict['sigreg_total'].item():.2f} | "
+                    f"pred {loss_dict['loss_pred'].item():.4f} | "
+                    f"sigreg {loss_dict['sigreg'].item():.2f} | "
                     f"lr {lr:.2e} | "
                     f"grad {grad_norm:.2f}"
                 )
@@ -321,7 +310,8 @@ def train(args):
             val_metrics = validate(model, val_loader, device)
             if use_wandb:
                 wandb.log(val_metrics, step=global_step)
-            print(f"  val/loss: {val_metrics['val/loss']:.4f}")
+            print(f"  val/loss: {val_metrics['val/loss']:.4f} | "
+                  f"val/loss_pred: {val_metrics['val/loss_pred']:.4f}")
 
             # Save best model
             if val_metrics["val/loss"] < best_val_loss:
@@ -373,11 +363,7 @@ if __name__ == "__main__":
     parser.add_argument("--predictor_dim", type=int, default=192)
     parser.add_argument("--predictor_depth", type=int, default=4)
     parser.add_argument("--predictor_heads", type=int, default=6)
-    parser.add_argument("--within_mask_ratio", type=float, default=0.75)
-
     # Loss weights
-    parser.add_argument("--lambda_within", type=float, default=1.0)
-    parser.add_argument("--lambda_cross", type=float, default=1.0)
     parser.add_argument("--lambda_sigreg", type=float, default=0.01)
 
     # Training
