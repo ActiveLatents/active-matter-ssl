@@ -14,7 +14,7 @@
 #SBATCH --mail-user=sk12590@nyu.edu
 
 # Activate environment
-singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-500K.ext3:rw \
+singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-500K.ext3:ro \
     /share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif \
     /bin/bash -c "
         source /ext3/env.sh
@@ -23,8 +23,8 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
 
         python -m src.train_ssl \
             --data_dir /scratch/sk12590/dl_project_data/data \
-            --n_frames 16 \
-            --train_stride 2 \
+            --n_frames 32 \
+            --train_stride 1 \
             --val_stride 1 \
             --batch_size 6 \
             --num_workers 4 \
@@ -43,6 +43,6 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --log_every 50 \
             --val_every 5 \
             --wandb_project active-matter-ssl \
-            --run_name cfjepa-frame-prediction \
+            --run_name cfjepa-ssl-frame-prediction \
             --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl_frame_pred
         "
