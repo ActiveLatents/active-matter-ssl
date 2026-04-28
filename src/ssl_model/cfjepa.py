@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from .patch_embed import ChannelFactoredPatchEmbed, SinglePatchEmbed
 from .encoder import ViTEncoder
 from .predictor import Predictor
-from .masking import generate_masks, batch_mask_indices
+from .masking import generate_masks, within_field_block_mask, batch_mask_indices
 from .losses import prediction_loss, sigreg_loss
 
 
@@ -132,12 +132,22 @@ class CFJEPA(nn.Module):
         B, N_total, D = all_tokens.shape
 
         # 2. Generate spatiotemporal block masks
-        within_masks, cross_masks = generate_masks(
-            field_indices,
-            grid_shape=grid_shape,
-            within_mask_ratio=self.within_mask_ratio,
-            device=device,
-        )
+        if self.use_channel_factored:
+            within_masks, cross_masks = generate_masks(
+                field_indices,
+                grid_shape=grid_shape,
+                within_mask_ratio=self.within_mask_ratio,
+                device=device,
+            )
+        else:
+            w_vis, w_mask = within_field_block_mask(
+                field_indices,
+                grid_shape=grid_shape,
+                mask_ratio=self.within_mask_ratio,
+                device=device,
+            )
+            within_masks = {"visible_ids": w_vis, "masked_ids": w_mask}
+            cross_masks = None
 
         # 3. Target pass: full encoder on all tokens.
         # pos_ids: (N_total, 3) → expand to (B, N_total, 3) for encoder
