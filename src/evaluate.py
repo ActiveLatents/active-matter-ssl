@@ -257,6 +257,7 @@ def evaluate(args):
         predictor_depth=config["predictor_depth"],
         predictor_heads=config["predictor_heads"],
         within_mask_ratio=config["within_mask_ratio"],
+        use_channel_factored=config.get("use_channel_factored", True),
     ).to(device)
 
     model.load_state_dict(ckpt["model_state_dict"])
