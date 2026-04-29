@@ -27,10 +27,10 @@ singularity exec --nv --overlay /scratch/sk12590/cross-modal-brain-retrieval/ove
             --train_stride 1 \
             --val_stride 1 \
             --batch_size 6 \
-            --num_workers 4 \
-            --embed_dim 384 \
+            --num_workers 8 \
+            --embed_dim 768 \
             --encoder_depth 12 \
-            --encoder_heads 6 \
+            --encoder_heads 12 \
             --predictor_dim 192 \
             --predictor_depth 4 \
             --predictor_heads 6 \
@@ -47,6 +47,6 @@ singularity exec --nv --overlay /scratch/sk12590/cross-modal-brain-retrieval/ove
             --val_every 5 \
             --wandb_project active-matter-ssl \
             --run_name cfjepa-ablation-single-patch-embed \
-            --single_patch_embed \
-            --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl_single_embed_mask90
+            --single_patch_embed_mask90_vitB \
+            --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl_single_embed_mask90_vitB
         "
