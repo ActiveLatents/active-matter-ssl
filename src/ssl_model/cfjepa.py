@@ -67,6 +67,12 @@ class CFJEPA(nn.Module):
             spatial_size=spatial_size,
         )
 
+        # RoPE must cover the full temporal range including the shifted target
+        # pos_ids (0..n_t_half-1 for context, n_t_half..n_t_full-1 for target).
+        max_t = n_frames // tube_t
+        max_h = spatial_size // patch_h
+        max_w = spatial_size // patch_w
+
         self.encoder = ViTEncoder(
             embed_dim=embed_dim,
             depth=encoder_depth,
@@ -74,6 +80,9 @@ class CFJEPA(nn.Module):
             mlp_ratio=mlp_ratio,
             drop_rate=drop_rate,
             attn_drop_rate=attn_drop_rate,
+            max_t=max_t,
+            max_h=max_h,
+            max_w=max_w,
         )
 
         self.target_encoder = copy.deepcopy(self.encoder)
@@ -86,6 +95,9 @@ class CFJEPA(nn.Module):
             depth=predictor_depth,
             n_heads=predictor_heads,
             mlp_ratio=mlp_ratio,
+            max_t=max_t,
+            max_h=max_h,
+            max_w=max_w,
         )
 
     def _split_field_dict(self, field_dict):
