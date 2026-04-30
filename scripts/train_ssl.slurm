@@ -46,7 +46,7 @@ singularity exec --nv --overlay /scratch/sk12590/cross-modal-brain-retrieval/ove
             --log_every 50 \
             --val_every 5 \
             --wandb_project active-matter-ssl \
-            --run_name cfjepa-ablation-single-patch-embed \
-            --single_patch_embed_mask90_vitB \
+            --run_name cfjepa-ablation-single-patch-embed_mask90_vitB \
+            --single_patch_embed \
             --checkpoint_dir /scratch/sk12590/active-matter-ssl/runs/ssl_single_embed_mask90_vitB
         "
