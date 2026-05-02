@@ -1,40 +1,63 @@
-#!/bin/bash
-#SBATCH --requeue
+#!/usr/bin/env bash
 #SBATCH --job-name=supervised_baseline
-#SBATCH --partition=c12m85-a100-1
-#SBATCH --account=csci_ga_2572-2026sp
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64GB
-#SBATCH --gres=gpu:1
+#SBATCH --output=logs/%x-%j.out
+#SBATCH --error=logs/%x-%j.err
 #SBATCH --time=24:00:00
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --requeue
 #SBATCH --signal=USR1@120
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sk12590@nyu.edu
 
-# ── Environment ───────────────────────────────────────────────────────────────
-module purge
-singularity exec --nv \
-    --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-500K.ext3:rw \
-    /share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif \
-    /bin/bash -c "
-        source /ext3/env.sh
+set -euo pipefail
 
-        cd /scratch/sk12590/active-matter-ssl
+mkdir -p logs
 
-        python -m src.train_supervised \
-            --data_dir    /scratch/sk12590/dl_project_data/data \
-            --output_dir  runs/supervised \
-            --epochs      50 \
-            --batch_size  4 \
-            --n_frames    32 \
-            --lr          1e-3 \
-            --stride      1 \
-            --num_workers 8 \
-            --wandb_project active-matter-ssl \
-            --wandb_run   supervised-baseline \
-            --resume      runs/supervised/last.pt
-    "
+export SIF="${SIF:-/share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif}"
+export OVERLAY="${OVERLAY:-/scratch/$USER/my_env/overlay-25GB-500K.ext3:ro}"
+export CONDA_ENV="${CONDA_ENV:-am_ssl}"
+export ENV_PREFIX="${ENV_PREFIX:-/scratch/$USER/my_env/conda_envs/${CONDA_ENV}}"
+export PYTHON_BIN="${PYTHON_BIN:-${ENV_PREFIX}/bin/python}"
+export DATA_DIR="${DATA_DIR:-/scratch/zl6113/active-matter/data}"
+export OUTPUT_DIR="${OUTPUT_DIR:-/scratch/$USER/active-matter-ssl/runs/supervised}"
+export RUN_NAME="${RUN_NAME:-supervised-cnn-baseline}"
+export WANDB_PROJECT="${WANDB_PROJECT:-dl_project_sst}"
+export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-/scratch/$USER/my_env/conda_pkgs}"
+export CONDA_ENVS_PATH="${CONDA_ENVS_PATH:-/scratch/$USER/my_env/conda_envs}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/scratch/$USER/my_env/pip_cache}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/scratch/$USER/my_env/.cache}"
+export HOME="${HOME:-/scratch/$USER/my_env/home}"
+export TMPDIR="${TMPDIR:-/scratch/$USER/my_env/tmp}"
+
+mkdir -p "${CONDA_PKGS_DIRS}" "${CONDA_ENVS_PATH}" "${PIP_CACHE_DIR}" "${XDG_CACHE_HOME}" "${HOME}" "${TMPDIR}" "${OUTPUT_DIR}"
+
+singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
+  set -euo pipefail
+  source /ext3/env.sh
+  export HOME='${HOME}'
+  export TMPDIR='${TMPDIR}'
+  export CONDA_PKGS_DIRS='${CONDA_PKGS_DIRS}'
+  export CONDA_ENVS_PATH='${CONDA_ENVS_PATH}'
+  export PIP_CACHE_DIR='${PIP_CACHE_DIR}'
+  export XDG_CACHE_HOME='${XDG_CACHE_HOME}'
+  export CONDA_NO_PLUGINS=true
+  cd /scratch/$USER/active-matter-ssl
+  export WANDB_API_KEY=\$(tr -d '\r\n' < /scratch/$USER/.cache/wandb/api_key)
+  conda activate '${ENV_PREFIX}'
+
+  ${PYTHON_BIN} -m src.train_supervised \
+    --data_dir ${DATA_DIR} \
+    --output_dir ${OUTPUT_DIR} \
+    --epochs 50 \
+    --batch_size 16 \
+    --n_frames 16 \
+    --lr 1e-3 \
+    --weight_decay 1e-4 \
+    --stride 1 \
+    --num_workers 8 \
+    --prefetch_factor 4 \
+    --allow_tf32 \
+    --wandb_project ${WANDB_PROJECT} \
+    --wandb_run ${RUN_NAME} \
+    --resume ${OUTPUT_DIR}/last.pt
+"

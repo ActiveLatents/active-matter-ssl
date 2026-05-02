@@ -455,12 +455,11 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to trained CF-JEPA checkpoint (.pt)")
     parser.add_argument("--data_dir", type=str,
-                        default="/scratch/sk12590/dl_project_data/data")
+                        default="/scratch/zl6113/active-matter/data")
 
     # Feature extraction
-    parser.add_argument("--eval_stride", type=int, default=16,
-                        help="Stride for sliding windows during evaluation "
-                             "(16 = non-overlapping, reduces redundancy)")
+    parser.add_argument("--eval_stride", type=int, default=2,
+                        help="Stride for sliding windows during evaluation")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=4)
 
@@ -478,8 +477,8 @@ if __name__ == "__main__":
                         help="Use EMA target encoder for feature extraction instead of online encoder")
 
     # Logging
-    parser.add_argument("--wandb_org", type=str, default=None, help="W&B entity/org name")
-    parser.add_argument("--wandb_project", type=str, default="cfjepa-active-matter")
+    parser.add_argument("--wandb_org", type=str, default=None, help="Optional W&B entity/org name")
+    parser.add_argument("--wandb_project", type=str, default="dl_project_sst")
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
 
