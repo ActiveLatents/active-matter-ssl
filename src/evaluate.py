@@ -31,6 +31,15 @@ from src.dataset import build_dataloader
 from src.ssl_model import CFJEPA
 
 
+def _unwrap_compiled_state_dict(state_dict):
+    if not any(key.startswith("_orig_mod.") for key in state_dict):
+        return state_dict
+    return {
+        key.removeprefix("_orig_mod."): value
+        for key, value in state_dict.items()
+    }
+
+
 # ── Feature extraction ──────────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -259,7 +268,7 @@ def evaluate(args):
         within_mask_ratio=config["within_mask_ratio"],
     ).to(device)
 
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(_unwrap_compiled_state_dict(ckpt["model_state_dict"]))
     model.eval()
     print("  Model loaded successfully")
 

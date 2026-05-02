@@ -12,6 +12,19 @@ from src.dataset import build_dataloader
 from src.diffusion_model import FutureLatentDiffusion
 
 
+def _base_model(model):
+    return getattr(model, "_orig_mod", model)
+
+
+def _unwrap_compiled_state_dict(state_dict):
+    if not any(key.startswith("_orig_mod.") for key in state_dict):
+        return state_dict
+    return {
+        key.removeprefix("_orig_mod."): value
+        for key, value in state_dict.items()
+    }
+
+
 def get_lr(step, total_steps, warmup_steps, base_lr, min_lr=1e-6):
     if step < warmup_steps:
         return base_lr * step / max(warmup_steps, 1)
@@ -32,7 +45,7 @@ def get_ema_momentum(step, total_steps, base_ema=0.996, max_ema=1.0):
 def save_checkpoint(path, model, optimizer, epoch, step, best_val_loss, config):
     torch.save(
         {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": _base_model(model).state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "epoch": epoch,
             "step": step,
@@ -45,7 +58,7 @@ def save_checkpoint(path, model, optimizer, epoch, step, best_val_loss, config):
 
 def load_checkpoint(path, model, optimizer, device):
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(_unwrap_compiled_state_dict(ckpt["model_state_dict"]))
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     return ckpt["epoch"], ckpt["step"], ckpt["best_val_loss"]
 

@@ -1,5 +1,5 @@
 """
-Train a simple from-scratch CNN supervised baseline on normalized [zeta, alpha].
+Train a simple from-scratch ResNet supervised baseline on normalized [zeta, alpha].
 
 This is intended as an end-to-end regression baseline to compare against
 representation-learning methods evaluated with frozen linear probe / kNN.
@@ -21,8 +21,12 @@ from src.models import SupervisedBaseline
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Supervised CNN baseline")
-    parser.add_argument("--data_dir", type=str, default="/scratch/sk12590/dl_project_data/data")
+    parser = argparse.ArgumentParser(description="Supervised ResNet baseline")
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default=os.path.expandvars("/scratch/$USER/active-matter/data"),
+    )
     parser.add_argument("--output_dir", type=str, default="runs/supervised")
     parser.add_argument("--n_frames", type=int, default=16)
     parser.add_argument("--stride", type=int, default=1)

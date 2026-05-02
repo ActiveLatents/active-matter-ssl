@@ -1,1 +1,1 @@
-from .supervised_baseline import CNNEncoder, SupervisedBaseline
+from .supervised_baseline import ResNetFrameEncoder, SupervisedBaseline
