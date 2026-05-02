@@ -10,3 +10,4 @@ checkpoints/
 .DS_Store
 logs/
 runs/
+.log
