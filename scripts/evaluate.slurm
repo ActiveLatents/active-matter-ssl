@@ -21,7 +21,7 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
         cd /scratch/sk12590/active-matter-ssl
 
         python -m src.evaluate \
-            --checkpoint /scratch/sk12590/active-matter-ssl/runs/ssl_single_embed_mask90/best.pt \
+            --checkpoint /scratch/sk12590/active-matter-ssl/runs/ssl_single_embed_mask75_vitB/best.pt \
             --data_dir /scratch/sk12590/dl_project_data/data \
             --eval_stride 2 \
             --batch_size 8 \
@@ -32,5 +32,5 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --knn_k 20 \
             --wandb_org dl_project_sst \
             --wandb_project team_active_matter \
-            --run_name linear_probe_and_knn_eval_ablation_single_patch_embed_mask90_${SLURM_JOB_ID} \
+            --run_name linear_probe_and_knn_eval_ablation_single_patch_embed_mask75_vitB_${SLURM_JOB_ID} \
         "
