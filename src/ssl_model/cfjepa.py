@@ -192,7 +192,7 @@ class CFJEPA(nn.Module):
             target_param.data.mul_(momentum).add_(param.data, alpha=1.0 - momentum)
 
     @torch.no_grad()
-    def encode(self, field_dict, pool="mean"):
+    def encode(self, field_dict, pool="mean", use_target_encoder=False):
         """
         Extract representations for evaluation (linear probe / kNN).
 
@@ -208,7 +208,8 @@ class CFJEPA(nn.Module):
         ctx_tokens, _, _, pos_ids_ctx = self.patch_embed(ctx_dict)
         B = ctx_tokens.shape[0]
         ctx_pos = pos_ids_ctx.unsqueeze(0).expand(B, -1, -1)
-        encoder_out = self.encoder(ctx_tokens, pos_ids=ctx_pos)
+        enc = self.target_encoder if use_target_encoder else self.encoder
+        encoder_out = enc(ctx_tokens, pos_ids=ctx_pos)
 
         if pool == "mean":
             return encoder_out.mean(dim=1)
