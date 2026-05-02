@@ -173,6 +173,57 @@ class CFJEPA(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
+    def _temporal_chunk_summary(self, tokens, token_indices, pos_ids, split_t, is_future, n_chunks=4):
+        """
+        Build chunkwise temporal summaries for selected tokens.
+
+        Args:
+            tokens:         (B, N_sel, D)
+            token_indices:  (B, N_sel) global token indices into pos_ids
+            pos_ids:        (N_total, 3)
+            split_t:        temporal split between context and future
+            is_future:      whether these tokens belong to the future half
+            n_chunks:       number of chunks within the half-window
+
+        Returns:
+            summaries:      (B, n_chunks, D)
+        """
+        B, _, D = tokens.shape
+        token_t = pos_ids[token_indices][..., 0]
+        if is_future:
+            local_t = token_t - split_t
+            max_t = max(int(pos_ids[:, 0].max().item() + 1 - split_t), 1)
+        else:
+            local_t = token_t
+            max_t = max(int(split_t), 1)
+
+        chunk_ids = (local_t * n_chunks) // max(max_t, 1)
+        chunk_ids = chunk_ids.clamp(min=0, max=n_chunks - 1)
+
+        summaries = []
+        for chunk in range(n_chunks):
+            mask = chunk_ids == chunk
+            mask_f = mask.unsqueeze(-1).to(tokens.dtype)
+            denom = mask_f.sum(dim=1).clamp_min(1.0)
+            chunk_sum = (tokens * mask_f).sum(dim=1) / denom
+            summaries.append(chunk_sum)
+        return torch.stack(summaries, dim=1)
+
+    def _integrated_action_code(self, context_tokens, context_ids, future_tokens, future_ids, pos_ids, split_t):
+        """
+        Infer a transition code from chunkwise temporal summaries rather than
+        only pooled endpoints, making the action pathway more trajectory-aware.
+        """
+        context_chunks = self._temporal_chunk_summary(
+            context_tokens, context_ids, pos_ids, split_t, is_future=False
+        )
+        future_chunks = self._temporal_chunk_summary(
+            future_tokens, future_ids, pos_ids, split_t, is_future=True
+        )
+        pairwise_inputs = torch.cat([context_chunks, future_chunks], dim=-1)
+        pairwise_actions = self.action_infer(pairwise_inputs)
+        return pairwise_actions.mean(dim=1)
+
     def _kl_normal(self, mu_q, logvar_q, mu_p, logvar_p):
         return 0.5 * (
             logvar_p - logvar_q
@@ -383,8 +434,8 @@ class CFJEPA(nn.Module):
                 l_future = prediction_loss(f_preds, f_targets)
                 l_latent_kl = self._kl_normal(mu_q, logvar_q, mu_p, logvar_p)
             elif self.future_mode == "action":
-                action_code = self.action_infer(
-                    torch.cat([context_summary, future_summary], dim=-1)
+                action_code = self._integrated_action_code(
+                    f_encoder_out, f_vis_ids, f_targets, f_mask_ids, pos_ids, split_t
                 )
                 f_preds = self.predictor(
                     visible_tokens=f_encoder_out,
@@ -393,6 +444,31 @@ class CFJEPA(nn.Module):
                     total_tokens=N_total,
                     pos_ids=pos_ids,
                     condition=action_code,
+                )
+                l_future = prediction_loss(f_preds, f_targets)
+                pooled_future_pred = self.action_transition(
+                    torch.cat([context_summary, action_code], dim=-1)
+                )
+                l_action = F.mse_loss(pooled_future_pred, future_summary)
+            elif self.future_mode == "hybrid":
+                action_code = self._integrated_action_code(
+                    f_encoder_out, f_vis_ids, f_targets, f_mask_ids, pos_ids, split_t
+                )
+                timesteps = torch.randint(
+                    0, self.num_diffusion_steps, (B,), device=device, dtype=torch.long
+                )
+                noise = torch.randn_like(f_targets)
+                noisy_future = self._q_sample_future(f_targets, timesteps, noise)
+                time_cond = self.future_time_mlp(self._timestep_embedding(timesteps, D))
+                hybrid_cond = time_cond + action_code
+                f_preds = self.predictor(
+                    visible_tokens=f_encoder_out,
+                    visible_indices=f_vis_ids,
+                    masked_indices=f_mask_ids,
+                    total_tokens=N_total,
+                    pos_ids=pos_ids,
+                    masked_token_inputs=noisy_future,
+                    condition=hybrid_cond,
                 )
                 l_future = prediction_loss(f_preds, f_targets)
                 pooled_future_pred = self.action_transition(

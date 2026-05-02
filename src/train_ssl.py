@@ -443,7 +443,7 @@ if __name__ == "__main__":
     parser.add_argument("--mask_strategy", type=str, default="random",
                         choices=["random", "concentration"])
     parser.add_argument("--future_mode", type=str, default="direct",
-                        choices=["direct", "noisy", "latent", "action"])
+                        choices=["direct", "noisy", "latent", "action", "hybrid"])
     parser.add_argument("--use_checkpointing", action="store_true",
                         help="Checkpoint transformer blocks to trade compute for memory")
     parser.add_argument("--compile_model", action="store_true",
