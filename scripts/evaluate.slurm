@@ -13,7 +13,7 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=sk12590@nyu.edu
 
-singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-500K.ext3:rw \
+singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-500K.ext3:ro \
     /share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif \
     /bin/bash -c "
         source /ext3/env.sh
@@ -21,7 +21,7 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
         cd /scratch/sk12590/active-matter-ssl
 
         python -m src.evaluate \
-            --checkpoint /scratch/sk12590/active-matter-ssl/runs/ssl/best.pt \
+            --checkpoint /scratch/sk12590/active-matter-ssl/runs/ssl_frame_pred/best.pt \
             --data_dir /scratch/sk12590/dl_project_data/data \
             --eval_stride 2 \
             --batch_size 8 \
@@ -32,5 +32,5 @@ singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-
             --knn_k 20 \
             --wandb_org dl_project_sst \
             --wandb_project team_active_matter \
-            --run_name linear_probe_and_knn_eval_no_target_enc_${SLURM_JOB_ID} \
+            --run_name linear_probe_and_knn_eval_frame_prediction_${SLURM_JOB_ID} \
         "
