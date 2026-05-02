@@ -256,7 +256,7 @@ def evaluate(args):
         predictor_dim=config["predictor_dim"],
         predictor_depth=config["predictor_depth"],
         predictor_heads=config["predictor_heads"],
-        within_mask_ratio=config["within_mask_ratio"],
+
     ).to(device)
 
     model.load_state_dict(ckpt["model_state_dict"])
