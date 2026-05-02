@@ -69,20 +69,37 @@ def make_loader(data_dir, split, n_frames, stride, batch_size, num_workers, shuf
     )
 
 
-def run_epoch(model, loader, criterion, optimizer, device, train: bool, epoch, n_epochs):
+def compute_label_stats(train_loader):
+    """Compute per-target mean and std from the training set labels."""
+    all_labels = []
+    for _, labels in train_loader:
+        all_labels.append(labels)
+    all_labels = torch.cat(all_labels, dim=0)   # (N, 2)
+    mean = all_labels.mean(dim=0)
+    std  = all_labels.std(dim=0).clamp(min=1e-8)
+    return mean, std
+
+
+def run_epoch(model, loader, criterion, optimizer, device, train: bool, epoch, n_epochs,
+              label_mean, label_std):
     model.train(train)
     total_loss = 0.0
     n_samples = 0
     phase = "train" if train else "val"
 
+    label_mean = label_mean.to(device)
+    label_std  = label_std.to(device)
+
     pbar = tqdm(loader, desc=f"Epoch {epoch}/{n_epochs} [{phase}]", leave=False)
     with torch.set_grad_enabled(train):
         for frames, labels in pbar:
-            frames = frames.to(device, non_blocking=True)   # (B, T, 11, 224, 224)
+            frames = frames.to(device, non_blocking=True)   # (B, T, 11, H, W)
             labels = labels.to(device, non_blocking=True)   # (B, 2)
 
+            labels_norm = (labels - label_mean) / label_std
+
             preds = model(frames)
-            loss = criterion(preds, labels)
+            loss = criterion(preds, labels_norm)
 
             if train:
                 optimizer.zero_grad()
@@ -144,16 +161,25 @@ def main():
     start_epoch = 1
     best_val_loss = float("inf")
     current_epoch = 0
+    label_mean = label_std = None
 
     if args.resume and os.path.isfile(args.resume):
-        ckpt = torch.load(args.resume, map_location=device)
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["state_dict"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch   = ckpt["epoch"] + 1
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
         current_epoch = ckpt["epoch"]
+        label_mean    = ckpt.get("label_mean")
+        label_std     = ckpt.get("label_std")
         print(f"Resumed from epoch {ckpt['epoch']} (best val {best_val_loss:.4f})")
+
+    # ── Label statistics (z-score normalisation) ──────────────────────────────
+    if label_mean is None or label_std is None:
+        print("Computing label statistics from training set...")
+        label_mean, label_std = compute_label_stats(train_loader)
+    print(f"Label mean: {label_mean.tolist()}  std: {label_std.tolist()}")
 
     # ── Signal handler: save checkpoint and exit on SIGUSR1 (pre-emption) ────
     def _save_and_exit(signum, frame):
@@ -170,6 +196,8 @@ def main():
             "optimizer":     optimizer.state_dict(),
             "scheduler":     scheduler.state_dict(),
             "best_val_loss": best_val_loss,
+            "label_mean":    label_mean.cpu(),
+            "label_std":     label_std.cpu(),
             "args":          vars(args),
         }, os.path.join(args.output_dir, filename))
 
@@ -186,8 +214,8 @@ def main():
         current_epoch = epoch
         t0 = time.time()
 
-        train_loss = run_epoch(model, train_loader, criterion, optimizer, device, train=True,  epoch=epoch, n_epochs=args.epochs)
-        val_loss   = run_epoch(model, val_loader,   criterion, optimizer, device, train=False, epoch=epoch, n_epochs=args.epochs)
+        train_loss = run_epoch(model, train_loader, criterion, optimizer, device, train=True,  epoch=epoch, n_epochs=args.epochs, label_mean=label_mean, label_std=label_std)
+        val_loss   = run_epoch(model, val_loader,   criterion, optimizer, device, train=False, epoch=epoch, n_epochs=args.epochs, label_mean=label_mean, label_std=label_std)
         scheduler.step()
 
         elapsed = time.time() - t0
