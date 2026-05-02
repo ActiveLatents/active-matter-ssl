@@ -31,7 +31,6 @@ def parse_args():
     parser.add_argument("--n_frames", type=int, default=16)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--crop_size", type=int, default=None)
-    parser.add_argument("--embed_dim", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -180,7 +179,7 @@ def main():
             },
         )
 
-    model = SupervisedBaseline(embed_dim=args.embed_dim).to(device)
+    model = SupervisedBaseline().to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {total_params / 1e6:.2f}M")
     if use_wandb:
