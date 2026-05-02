@@ -58,11 +58,13 @@ class SweepConfig:
 
 
 def parse_csv_floats(text: str) -> list[float]:
-    return [float(item) for item in text.split(",") if item]
+    normalized = text.replace(":", ",")
+    return [float(item) for item in normalized.split(",") if item]
 
 
 def parse_csv_ints(text: str) -> list[int]:
-    return [int(item) for item in text.split(",") if item]
+    normalized = text.replace(":", ",")
+    return [int(item) for item in normalized.split(",") if item]
 
 
 def parse_args() -> argparse.Namespace:
