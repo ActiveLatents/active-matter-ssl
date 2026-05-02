@@ -159,6 +159,9 @@ def train(args):
         "predictor_dim": args.predictor_dim,
         "predictor_depth": args.predictor_depth,
         "predictor_heads": args.predictor_heads,
+        "drop_rate": args.drop_rate,
+        "attn_drop_rate": args.attn_drop_rate,
+        "drop_path_rate": args.drop_path_rate,
         "within_mask_ratio": args.within_mask_ratio,
         "mask_strategy": args.mask_strategy,
         "future_mode": args.future_mode,
@@ -231,6 +234,9 @@ def train(args):
         predictor_dim=args.predictor_dim,
         predictor_depth=args.predictor_depth,
         predictor_heads=args.predictor_heads,
+        drop_rate=args.drop_rate,
+        attn_drop_rate=args.attn_drop_rate,
+        drop_path_rate=args.drop_path_rate,
         within_mask_ratio=args.within_mask_ratio,
         mask_strategy=args.mask_strategy,
         future_mode=args.future_mode,
@@ -369,7 +375,7 @@ def train(args):
                         f"vort {loss_dict['loss_vorticity'].item():.4f} | "
                         f"spec {loss_dict['loss_spectral'].item():.4f} | "
                         f"kl {loss_dict['loss_latent_kl'].item():.4f} | "
-                        f"act {loss_dict['loss_action'].item():.4f} | "
+                        f"act {loss_dict['loss_action'].item():.6f} | "
                         f"sigreg {loss_dict['sigreg_total'].item():.2f} | "
                         f"lr {lr:.2e} | "
                         f"grad {grad_norm:.2f}"
@@ -439,11 +445,14 @@ if __name__ == "__main__":
     parser.add_argument("--predictor_dim", type=int, default=192)
     parser.add_argument("--predictor_depth", type=int, default=4)
     parser.add_argument("--predictor_heads", type=int, default=6)
+    parser.add_argument("--drop_rate", type=float, default=0.0)
+    parser.add_argument("--attn_drop_rate", type=float, default=0.0)
+    parser.add_argument("--drop_path_rate", type=float, default=0.0)
     parser.add_argument("--within_mask_ratio", type=float, default=0.75)
     parser.add_argument("--mask_strategy", type=str, default="random",
                         choices=["random", "concentration"])
     parser.add_argument("--future_mode", type=str, default="direct",
-                        choices=["direct", "noisy", "latent", "action", "hybrid"])
+                        choices=["direct", "noisy", "latent", "action", "hybrid", "hierarchical"])
     parser.add_argument("--use_checkpointing", action="store_true",
                         help="Checkpoint transformer blocks to trade compute for memory")
     parser.add_argument("--compile_model", action="store_true",

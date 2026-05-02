@@ -18,6 +18,25 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 
+def drop_path(x, drop_prob: float = 0.0, training: bool = False):
+    if drop_prob == 0.0 or not training:
+        return x
+    keep_prob = 1.0 - drop_prob
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+    random_tensor.floor_()
+    return x.div(keep_prob) * random_tensor
+
+
+class DropPath(nn.Module):
+    def __init__(self, drop_prob=0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        return drop_path(x, self.drop_prob, self.training)
+
+
 class RoPE3D(nn.Module):
     """
     3D Rotary Position Embedding for spatiotemporal transformer tokens.
@@ -152,7 +171,7 @@ class TransformerBlock(nn.Module):
 
     def __init__(
         self, dim, n_heads=6, mlp_ratio=4.0, qkv_bias=True,
-        drop=0.0, attn_drop=0.0,
+        drop=0.0, attn_drop=0.0, drop_path_rate=0.0,
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
@@ -160,12 +179,14 @@ class TransformerBlock(nn.Module):
             dim, n_heads=n_heads, qkv_bias=qkv_bias,
             attn_drop=attn_drop, proj_drop=drop,
         )
+        self.drop_path1 = DropPath(drop_path_rate)
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = MLP(dim, mlp_ratio=mlp_ratio, drop=drop)
+        self.drop_path2 = DropPath(drop_path_rate)
 
     def forward(self, x, rope=None, pos_ids=None):
-        x = x + self.attn(self.norm1(x), rope=rope, pos_ids=pos_ids)
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.drop_path1(self.attn(self.norm1(x), rope=rope, pos_ids=pos_ids))
+        x = x + self.drop_path2(self.mlp(self.norm2(x)))
         return x
 
 
@@ -190,6 +211,7 @@ class ViTEncoder(nn.Module):
         qkv_bias=True,
         drop_rate=0.0,
         attn_drop_rate=0.0,
+        drop_path_rate=0.0,
         max_t=8,
         max_h=16,
         max_w=16,
@@ -202,6 +224,7 @@ class ViTEncoder(nn.Module):
 
         self.rope = RoPE3D(head_dim, max_t=max_t, max_h=max_h, max_w=max_w)
 
+        drop_path_rates = torch.linspace(0, drop_path_rate, depth).tolist()
         self.blocks = nn.ModuleList([
             TransformerBlock(
                 dim=embed_dim,
@@ -210,8 +233,9 @@ class ViTEncoder(nn.Module):
                 qkv_bias=qkv_bias,
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
+                drop_path_rate=drop_path_rates[i],
             )
-            for _ in range(depth)
+            for i in range(depth)
         ])
 
         self.norm = nn.LayerNorm(embed_dim)

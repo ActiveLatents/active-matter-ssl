@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=cfjepa_eval
+#SBATCH --job-name=diffusion_eval
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 #SBATCH --time=08:00:00
@@ -19,8 +19,8 @@ export CONDA_ENV="${CONDA_ENV:-am_ssl}"
 export ENV_PREFIX="${ENV_PREFIX:-/scratch/$USER/my_env/conda_envs/${CONDA_ENV}}"
 export PYTHON_BIN="${PYTHON_BIN:-${ENV_PREFIX}/bin/python}"
 export DATA_DIR="${DATA_DIR:-/scratch/zl6113/active-matter/data}"
-export CHECKPOINT="${CHECKPOINT:-/scratch/$USER/active-matter-ssl/runs/ssl/best.pt}"
-export RUN_NAME="${RUN_NAME:-linear_probe_and_knn_eval}"
+export CHECKPOINT="${CHECKPOINT:-/scratch/$USER/active-matter-ssl/runs/diffusion/best_diffusion.pt}"
+export RUN_NAME="${RUN_NAME:-diffusion_eval}"
 export WANDB_PROJECT="${WANDB_PROJECT:-dl_project_sst}"
 export EVAL_STRIDE="${EVAL_STRIDE:-2}"
 export BATCH_SIZE="${BATCH_SIZE:-8}"
@@ -52,7 +52,7 @@ singularity exec --nv --overlay "${OVERLAY}" "${SIF}" /bin/bash -lc "
   export WANDB_API_KEY=\$(tr -d '\r\n' < /scratch/$USER/.cache/wandb/api_key)
   conda activate '${ENV_PREFIX}'
 
-  ${PYTHON_BIN} -m src.evaluate \
+  ${PYTHON_BIN} -m src.evaluate_diffusion \
     --checkpoint ${CHECKPOINT} \
     --data_dir ${DATA_DIR} \
     --eval_stride ${EVAL_STRIDE} \

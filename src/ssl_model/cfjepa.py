@@ -53,6 +53,7 @@ class CFJEPA(nn.Module):
         mlp_ratio=4.0,
         drop_rate=0.0,
         attn_drop_rate=0.0,
+        drop_path_rate=0.0,
         # Predictor
         predictor_dim=192,
         predictor_depth=4,
@@ -107,6 +108,7 @@ class CFJEPA(nn.Module):
             mlp_ratio=mlp_ratio,
             drop_rate=drop_rate,
             attn_drop_rate=attn_drop_rate,
+            drop_path_rate=drop_path_rate,
             use_checkpointing=use_checkpointing,
         )
 
@@ -223,6 +225,23 @@ class CFJEPA(nn.Module):
         pairwise_inputs = torch.cat([context_chunks, future_chunks], dim=-1)
         pairwise_actions = self.action_infer(pairwise_inputs)
         return pairwise_actions.mean(dim=1)
+
+    def _chunkwise_transition_loss(self, context_tokens, context_ids, future_tokens, future_ids, pos_ids, split_t, action_code):
+        """
+        Predict future chunk summaries from context chunk summaries plus a
+        global transition code. This acts as a coarse global-dynamics loss.
+        """
+        context_chunks = self._temporal_chunk_summary(
+            context_tokens, context_ids, pos_ids, split_t, is_future=False
+        )
+        future_chunks = self._temporal_chunk_summary(
+            future_tokens, future_ids, pos_ids, split_t, is_future=True
+        )
+        expanded_action = action_code.unsqueeze(1).expand_as(context_chunks)
+        pred_future_chunks = self.action_transition(
+            torch.cat([context_chunks, expanded_action], dim=-1)
+        )
+        return F.mse_loss(pred_future_chunks, future_chunks)
 
     def _kl_normal(self, mu_q, logvar_q, mu_p, logvar_p):
         return 0.5 * (
@@ -393,11 +412,10 @@ class CFJEPA(nn.Module):
             f_visible_tokens = self._gather_tokens(all_tokens, f_vis_ids)
             f_pos_ids = pos_ids[f_vis_ids]
             f_encoder_out = self.encoder(f_visible_tokens, pos_ids=f_pos_ids)
-            f_targets = F.normalize(
-                self._gather_tokens(full_target_out, f_mask_ids).float(), dim=-1
-            )
+            f_targets_raw = self._gather_tokens(full_target_out, f_mask_ids).float()
+            f_targets = F.normalize(f_targets_raw, dim=-1)
             context_summary = f_encoder_out.mean(dim=1)
-            future_summary = f_targets.mean(dim=1)
+            future_summary = f_targets_raw.mean(dim=1)
             if self.future_mode == "noisy":
                 timesteps = torch.randint(
                     0, self.num_diffusion_steps, (B,), device=device, dtype=torch.long
@@ -435,7 +453,7 @@ class CFJEPA(nn.Module):
                 l_latent_kl = self._kl_normal(mu_q, logvar_q, mu_p, logvar_p)
             elif self.future_mode == "action":
                 action_code = self._integrated_action_code(
-                    f_encoder_out, f_vis_ids, f_targets, f_mask_ids, pos_ids, split_t
+                    f_encoder_out, f_vis_ids, f_targets_raw, f_mask_ids, pos_ids, split_t
                 )
                 f_preds = self.predictor(
                     visible_tokens=f_encoder_out,
@@ -452,7 +470,7 @@ class CFJEPA(nn.Module):
                 l_action = F.mse_loss(pooled_future_pred, future_summary)
             elif self.future_mode == "hybrid":
                 action_code = self._integrated_action_code(
-                    f_encoder_out, f_vis_ids, f_targets, f_mask_ids, pos_ids, split_t
+                    f_encoder_out, f_vis_ids, f_targets_raw, f_mask_ids, pos_ids, split_t
                 )
                 timesteps = torch.randint(
                     0, self.num_diffusion_steps, (B,), device=device, dtype=torch.long
@@ -475,6 +493,34 @@ class CFJEPA(nn.Module):
                     torch.cat([context_summary, action_code], dim=-1)
                 )
                 l_action = F.mse_loss(pooled_future_pred, future_summary)
+            elif self.future_mode == "hierarchical":
+                action_code = self._integrated_action_code(
+                    f_encoder_out, f_vis_ids, f_targets_raw, f_mask_ids, pos_ids, split_t
+                )
+                timesteps = torch.randint(
+                    0, self.num_diffusion_steps, (B,), device=device, dtype=torch.long
+                )
+                noise = torch.randn_like(f_targets)
+                noisy_future = self._q_sample_future(f_targets, timesteps, noise)
+                time_cond = self.future_time_mlp(self._timestep_embedding(timesteps, D))
+                hierarchical_cond = time_cond + action_code
+                f_preds = self.predictor(
+                    visible_tokens=f_encoder_out,
+                    visible_indices=f_vis_ids,
+                    masked_indices=f_mask_ids,
+                    total_tokens=N_total,
+                    pos_ids=pos_ids,
+                    masked_token_inputs=noisy_future,
+                    condition=hierarchical_cond,
+                )
+                l_future = prediction_loss(f_preds, f_targets)
+                pooled_future_pred = self.action_transition(
+                    torch.cat([context_summary, action_code], dim=-1)
+                )
+                global_chunk_loss = self._chunkwise_transition_loss(
+                    f_encoder_out, f_vis_ids, f_targets_raw, f_mask_ids, pos_ids, split_t, action_code
+                )
+                l_action = 0.5 * F.mse_loss(pooled_future_pred, future_summary) + 0.5 * global_chunk_loss
             else:
                 f_preds = self.predictor(
                     visible_tokens=f_encoder_out,
