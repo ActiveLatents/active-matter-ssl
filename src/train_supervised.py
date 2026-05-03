@@ -12,10 +12,12 @@ Usage:
 
 import argparse
 import os
+import random
 import signal
 import sys
 import time
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -98,7 +100,10 @@ def run_epoch(model, loader, criterion, optimizer, device, train: bool, epoch, n
 
 def main():
     args = parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")

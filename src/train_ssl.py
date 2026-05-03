@@ -14,14 +14,23 @@ Usage:
 
 import argparse
 import os
+import random
 import signal
 import sys
 import time
 
+import numpy as np
 import torch
 import torch.nn as nn
 import wandb
 from torch.amp import GradScaler, autocast
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 from src.dataset import build_dataloader
 from src.ssl_model import CFJEPA
@@ -97,6 +106,8 @@ def validate(model, val_loader, device):
 
 
 def train(args):
+
+    set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -373,6 +384,9 @@ if __name__ == "__main__":
 
     # Checkpointing
     parser.add_argument("--checkpoint_dir", type=str, default="/scratch/sk12590/active-matter-ssl/runs/ssl")
+
+    # Reproducibility
+    parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
 

@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import os
+import random
 import time
 
 import numpy as np
@@ -206,6 +207,11 @@ def print_results(method, split, mse_total, mse_zeta, mse_alpha):
 
 
 def evaluate(args):
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -462,6 +468,7 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_project", type=str, default="cfjepa-active-matter")
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
+    parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
 
