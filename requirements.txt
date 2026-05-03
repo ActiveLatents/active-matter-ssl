@@ -1,0 +1,11 @@
+h5py
+numpy
+matplotlib
+scipy
+scikit-learn
+pyyaml
+wandb
+einops
+timm
+tqdm
+ipykernel
