@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=cfjepa_hier
-#SBATCH --partition=h200_public
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 #SBATCH --time=24:00:00
