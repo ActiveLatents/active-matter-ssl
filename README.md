@@ -189,37 +189,37 @@ Example small grid used in this branch:
 ### Train latent future JEPA
 
 ```bash
-sbatch --account=torch_pr_494_general scripts/train_ssl_latent.slurm
+sbatch scripts/train_ssl_latent.slurm
 ```
 
 ### Train noisy future JEPA
 
 ```bash
-sbatch --account=torch_pr_494_general scripts/train_ssl_noisy_latent.slurm
+sbatch scripts/train_ssl_noisy_latent.slurm
 ```
 
 ### Train action-conditioned future JEPA
 
 ```bash
-sbatch --account=torch_pr_494_general scripts/train_ssl_action.slurm
+sbatch scripts/train_ssl_action.slurm
 ```
 
 ### Train hybrid future JEPA
 
 ```bash
-sbatch --account=torch_pr_494_general scripts/train_ssl_hybrid.slurm
+sbatch scripts/train_ssl_hybrid.slurm
 ```
 
 ### Train hierarchical future JEPA
 
 ```bash
-sbatch --account=torch_pr_494_general scripts/train_ssl_hierarchical.slurm
+sbatch scripts/train_ssl_hierarchical.slurm
 ```
 
 ### Evaluate JEPA / future-prediction checkpoint
 
 ```bash
-sbatch --account=torch_pr_494_general \
+sbatch \
   --export=ALL,CHECKPOINT=/scratch/$USER/active-matter-ssl/runs/ssl_hybrid/best.pt,RUN_NAME=eval_hybrid \
   scripts/evaluate.slurm
 ```
@@ -227,7 +227,7 @@ sbatch --account=torch_pr_494_general \
 ### Evaluate diffusion checkpoint
 
 ```bash
-sbatch --account=torch_pr_494_general scripts/evaluate_diffusion.slurm
+sbatch scripts/evaluate_diffusion.slurm
 ```
 
 ## Compute accounting
