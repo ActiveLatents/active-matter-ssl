@@ -1,5 +1,3 @@
-# src/ssl_model/cfjepa.py
-
 """
 Channel-Factored JEPA (CF-JEPA).
 
@@ -127,11 +125,9 @@ class CFJEPA(nn.Module):
         """
         device = next(self.parameters()).device
 
-        # 1. Patch embedding
         all_tokens, field_indices, grid_shape, pos_ids = self.patch_embed(field_dict)
         B, N_total, D = all_tokens.shape
 
-        # 2. Generate spatiotemporal block masks
         if self.use_channel_factored:
             within_masks, cross_masks = generate_masks(
                 field_indices,
@@ -149,14 +145,13 @@ class CFJEPA(nn.Module):
             within_masks = {"visible_ids": w_vis, "masked_ids": w_mask}
             cross_masks = None
 
-        # 3. Target pass: full encoder on all tokens.
+
         # pos_ids: (N_total, 3) → expand to (B, N_total, 3) for encoder
         full_pos_ids = pos_ids.unsqueeze(0).expand(B, -1, -1)
         with torch.no_grad():
             full_target_out = self.target_encoder(all_tokens, pos_ids=full_pos_ids)
 
 
-        # ── Within-field online pass ────────────────────────────────────
         w_vis_ids  = batch_mask_indices(within_masks["visible_ids"], B)
         w_mask_ids = batch_mask_indices(within_masks["masked_ids"],  B)
 
@@ -176,9 +171,7 @@ class CFJEPA(nn.Module):
             self._gather_tokens(full_target_out, w_mask_ids).float(), dim=-1
         )
 
-        # ── Cross-field online pass (channel-factored only) ────────────
-        # With a single patch embed there is only one token group, so
-        # cross-field masking is undefined — skip it and zero the loss.
+
         if self.use_channel_factored:
             c_vis_ids  = batch_mask_indices(cross_masks["visible_ids"], B)
             c_mask_ids = batch_mask_indices(cross_masks["masked_ids"],  B)
@@ -201,10 +194,8 @@ class CFJEPA(nn.Module):
         else:
             l_cross = torch.tensor(0.0, device=device)
 
-        # ── Losses ─────────────────────────────────────────────────────
         l_within = prediction_loss(w_preds, w_targets)
 
-        # SIGReg over within-field predictor outputs (+ cross if available).
         n_w = min(1024, w_preds.shape[1])
         idx_w = torch.randperm(w_preds.shape[1], device=device)[:n_w]
         if self.use_channel_factored:
@@ -280,8 +271,6 @@ class CFJEPA(nn.Module):
         print(f"  {'total':16s}: {total / 1e6:.2f}M")
         return {"trainable": trainable, "total": total}
 
-
-# ── Quick test ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     model = CFJEPA(

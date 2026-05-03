@@ -105,7 +105,6 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # ── Data ──────────────────────────────────────────────────────────────────
     train_loader = make_loader(
         args.data_dir, "train", args.n_frames, args.stride,
         args.batch_size, args.num_workers, shuffle=True,
@@ -115,7 +114,6 @@ def main():
         args.batch_size, args.num_workers, shuffle=False,
     )
 
-    # ── W&B ───────────────────────────────────────────────────────────────────
     use_wandb = not args.no_wandb
     if use_wandb:
         wandb.init(
@@ -124,14 +122,12 @@ def main():
             config=vars(args),
         )
 
-    # ── Model ─────────────────────────────────────────────────────────────────
     model = SupervisedBaseline(embed_dim=args.embed_dim).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {total_params / 1e6:.2f}M")
     if use_wandb:
         wandb.config.update({"total_params": total_params})
 
-    # ── Optimiser & scheduler ─────────────────────────────────────────────────
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
@@ -140,7 +136,6 @@ def main():
         optimizer, T_max=args.epochs
     )
 
-    # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch = 1
     best_val_loss = float("inf")
     current_epoch = 0
@@ -155,7 +150,6 @@ def main():
         current_epoch = ckpt["epoch"]
         print(f"Resumed from epoch {ckpt['epoch']} (best val {best_val_loss:.4f})")
 
-    # ── Signal handler: save checkpoint and exit on SIGUSR1 (pre-emption) ────
     def _save_and_exit(signum, frame):
         print("\nSIGUSR1 received — saving checkpoint and exiting for requeue.")
         _save_checkpoint("last.pt", epoch=current_epoch)
@@ -175,7 +169,6 @@ def main():
 
     signal.signal(signal.SIGUSR1, _save_and_exit)
 
-    # ── Training loop ─────────────────────────────────────────────────────────
     log_path = os.path.join(args.output_dir, "log.csv")
     write_mode = "a" if args.resume and os.path.isfile(log_path) else "w"
     with open(log_path, write_mode) as f:
@@ -209,10 +202,8 @@ def main():
                 "lr":         current_lr,
             }, step=epoch, commit=True)
 
-        # Always save last checkpoint (for resume)
         _save_checkpoint("last.pt", epoch=epoch)
 
-        # Save best checkpoint
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             _save_checkpoint("best.pt", epoch=epoch)

@@ -13,6 +13,7 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=sk12590@nyu.edu
 
+
 singularity exec --nv --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-500K.ext3:ro \
     /share/apps/images/cuda12.2.2-cudnn8.9.4-devel-ubuntu22.04.3.sif \
     /bin/bash -c "

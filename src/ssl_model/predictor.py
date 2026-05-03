@@ -1,5 +1,3 @@
-# src/model/predictor.py
-
 """
 Lightweight prediction transformer.
 
@@ -48,16 +46,12 @@ class Predictor(nn.Module):
         self.encoder_dim = encoder_dim
         self.predictor_dim = predictor_dim
 
-        # Project from encoder dim to predictor dim
         self.input_proj = nn.Linear(encoder_dim, predictor_dim)
 
-        # Learnable mask token
         self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_dim))
 
-        # 3D RoPE for predictor attention (uses predictor head_dim)
         self.rope = RoPE3D(predictor_dim // n_heads, max_t=max_t, max_h=max_h, max_w=max_w)
 
-        # Transformer blocks
         self.blocks = nn.ModuleList([
             TransformerBlock(
                 dim=predictor_dim,
@@ -69,7 +63,6 @@ class Predictor(nn.Module):
 
         self.norm = nn.LayerNorm(predictor_dim)
 
-        # Project back to encoder dim for loss computation
         self.output_proj = nn.Linear(predictor_dim, encoder_dim)
 
         self._init_weights()
@@ -101,13 +94,10 @@ class Predictor(nn.Module):
         B, N_vis, _ = visible_tokens.shape
         N_mask = masked_indices.shape[1]
 
-        # Project visible tokens to predictor dimension
         visible = self.input_proj(visible_tokens)  # (B, N_vis, predictor_dim)
 
-        # Create mask tokens (cast to match visible dtype, e.g. bfloat16 under autocast)
         mask_tokens = self.mask_token.to(visible.dtype).expand(B, N_mask, -1)
-        
-        # Combine visible + mask tokens and restore original ordering
+
         all_tokens = torch.zeros(
             B, total_tokens, self.predictor_dim,
             device=visible.device, dtype=visible.dtype,
@@ -118,7 +108,6 @@ class Predictor(nn.Module):
         all_tokens.scatter_(1, vis_idx, visible)
         all_tokens.scatter_(1, mask_idx, mask_tokens)
 
-        # Expand pos_ids to batch: (1, total_tokens, 3) broadcasts across B
         rope = self.rope if pos_ids is not None else None
         batch_pos = pos_ids.unsqueeze(0) if pos_ids is not None else None
 
@@ -131,8 +120,6 @@ class Predictor(nn.Module):
 
         return predictions
 
-
-# ── Quick test ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     pred = Predictor(encoder_dim=384, predictor_dim=192, depth=4, n_heads=6)

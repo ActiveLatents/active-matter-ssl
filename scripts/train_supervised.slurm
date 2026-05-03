@@ -15,7 +15,7 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=sk12590@nyu.edu
 
-# ── Environment ───────────────────────────────────────────────────────────────
+
 module purge
 singularity exec --nv \
     --overlay /scratch/sk12590/active-matter-ssl/overlay-25GB-500K.ext3:ro \

@@ -1,5 +1,3 @@
-# src/test_pipeline.py
-
 """
 Quick sanity check for the full CF-JEPA pipeline.
 Run this on an interactive GPU node before submitting training jobs.
@@ -28,7 +26,6 @@ def test_pipeline(data_dir, device="cuda"):
     print("CF-JEPA Pipeline Sanity Check")
     print("=" * 60)
 
-    # ── 1. Dataset ──────────────────────────────────────────────
     print("\n[1/6] Loading dataset (SSL mode)...")
     loader = build_dataloader(
         data_dir=data_dir,
@@ -47,7 +44,6 @@ def test_pipeline(data_dir, device="cuda"):
             print(f"    {key:15s}: {val.shape}, dtype={val.dtype}")
     print("  PASSED")
 
-    # ── 2. Model init ───────────────────────────────────────────
     print("\n[2/6] Initializing model...")
     model = CFJEPA(
         embed_dim=384,
@@ -65,7 +61,6 @@ def test_pipeline(data_dir, device="cuda"):
     ).to(device)
     print("  PASSED")
 
-    # ── 3. Parameter count ──────────────────────────────────────
     print("\n[3/6] Parameter count:")
     counts = model.param_count()
     total = counts["total"]
@@ -73,15 +68,12 @@ def test_pipeline(data_dir, device="cuda"):
     print(f"  Total: {total/1e6:.2f}M (limit: 100M)")
     print("  PASSED")
 
-    # ── 4. SSL forward + backward ───────────────────────────────
     print("\n[4/6] SSL forward + backward pass...")
 
-    # Move batch to device (only field tensors, not labels)
     field_dict = {
         k: v.to(device) for k, v in batch.items() if k != "labels"
     }
 
-    # Reset peak stats so [6/6] reports peak for this forward+backward pass
     if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
@@ -90,10 +82,8 @@ def test_pipeline(data_dir, device="cuda"):
     for k, v in loss_dict.items():
         print(f"    {k}: {v:.4f}")
 
-    # Backward
     loss.backward()
 
-    # Check that gradients exist on key parameters
     has_grad = True
     for name, param in model.named_parameters():
         if param.requires_grad and param.grad is None:
@@ -103,7 +93,6 @@ def test_pipeline(data_dir, device="cuda"):
         print("  All parameters have gradients")
     print("  PASSED")
 
-    # ── 5. Encode (eval mode) ───────────────────────────────────
     print("\n[5/6] Encode pass (frozen features)...")
     model.eval()
     features = model.encode(field_dict)
@@ -111,14 +100,12 @@ def test_pipeline(data_dir, device="cuda"):
     print(f"  Features: {features.shape}")
     assert features.shape == expected_shape, f"Unexpected feature shape: {features.shape}, expected {expected_shape}"
 
-    # Check features are not collapsed (all same)
     feat_std = features.std(dim=0).mean()
     print(f"  Feature std (across batch): {feat_std:.4f}")
     if feat_std < 1e-6:
         print("  WARNING: features may be collapsed (very low variance)")
     print("  PASSED")
 
-    # ── 6. Memory usage ────────────────────────────────────────
     if device == "cuda":
         print("\n[6/6] GPU memory usage:")
         peak_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)

@@ -1,5 +1,3 @@
-# src/evaluate.py
-
 """
 Phase 2: Linear probe and kNN regression on frozen CF-JEPA representations.
 
@@ -31,7 +29,7 @@ from src.dataset import build_dataloader
 from src.ssl_model import CFJEPA
 
 
-# ── Feature extraction ──────────────────────────────────────────────────────
+# Feature extraction
 
 @torch.no_grad()
 def extract_features(model, loader, device, use_target_encoder=False):
@@ -59,7 +57,7 @@ def extract_features(model, loader, device, use_target_encoder=False):
     return torch.cat(all_features, dim=0), torch.cat(all_labels, dim=0)
 
 
-# ── Label normalization ─────────────────────────────────────────────────────
+# Label normalization
 
 def compute_label_stats(labels):
     """Compute per-target mean and std from training labels."""
@@ -77,7 +75,7 @@ def denormalize_labels(labels, mean, std):
     return labels * std + mean
 
 
-# ── Linear probe ────────────────────────────────────────────────────────────
+# Linear probe
 
 def train_linear_probe(
     train_features, train_labels,
@@ -155,7 +153,7 @@ def train_linear_probe(
     return linear, best_val_mse
 
 
-# ── kNN regression ──────────────────────────────────────────────────────────
+# kNN regression
 
 def knn_regression(train_features, train_labels, query_features, k=20):
     """
@@ -173,24 +171,19 @@ def knn_regression(train_features, train_labels, query_features, k=20):
     Returns:
         predictions: (N_query, 2)
     """
-    # Normalize features for better distance computation
     train_f = torch.nn.functional.normalize(train_features, dim=-1)
     query_f = torch.nn.functional.normalize(query_features, dim=-1)
 
-    # Compute in chunks to manage memory
     chunk_size = 512
     all_preds = []
 
     for i in range(0, query_f.shape[0], chunk_size):
         chunk = query_f[i : i + chunk_size]
 
-        # Cosine similarity (higher = closer)
         sim = chunk @ train_f.T  # (chunk, N_train)
 
-        # Top-k nearest neighbors
         _, topk_idx = sim.topk(k, dim=-1)  # (chunk, k)
 
-        # Average neighbor labels
         neighbor_labels = train_labels[topk_idx]  # (chunk, k, 2)
         preds = neighbor_labels.mean(dim=1)  # (chunk, 2)
         all_preds.append(preds)
@@ -198,7 +191,7 @@ def knn_regression(train_features, train_labels, query_features, k=20):
     return torch.cat(all_preds, dim=0)
 
 
-# ── Evaluation helpers ──────────────────────────────────────────────────────
+# Evaluation helpers
 
 def compute_mse(pred, target):
     """Per-target and overall MSE."""
@@ -212,14 +205,11 @@ def print_results(method, split, mse_total, mse_zeta, mse_alpha):
           f"(zeta: {mse_zeta:.6f}, alpha: {mse_alpha:.6f})")
 
 
-# ── Main ────────────────────────────────────────────────────────────────────
-
 def evaluate(args):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # ── Wandb ───────────────────────────────────────────────────
     use_wandb = not args.no_wandb
     if use_wandb:
         wandb.init(
@@ -239,7 +229,6 @@ def evaluate(args):
             resume="allow",
         )
 
-    # ── Load checkpoint ─────────────────────────────────────────
     print(f"\nLoading checkpoint: {args.checkpoint}")
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     config = ckpt["config"]
@@ -266,7 +255,6 @@ def evaluate(args):
 
     embed_dim = config["embed_dim"]
 
-    # ── Build dataloaders ───────────────────────────────────────
     print("\nLoading data...")
     loader_kwargs = dict(
         data_dir=args.data_dir,
@@ -281,7 +269,6 @@ def evaluate(args):
     val_loader = build_dataloader(split="valid", **loader_kwargs)
     test_loader = build_dataloader(split="test", **loader_kwargs)
 
-    # ── Extract features ────────────────────────────────────────
     print("\nExtracting features...")
 
     encoder_name = "target_encoder" if args.use_target_encoder else "encoder"
@@ -299,7 +286,6 @@ def evaluate(args):
     test_features, test_labels = extract_features(model, test_loader, device, args.use_target_encoder)
     print(f"  Test:  {test_features.shape} in {time.time() - t0:.0f}s")
 
-    # ── Z-score normalize labels ────────────────────────────────
     label_mean, label_std = compute_label_stats(train_labels)
     print(f"\nLabel stats (from train): mean={label_mean.tolist()}, std={label_std.tolist()}")
 
@@ -307,7 +293,6 @@ def evaluate(args):
     val_labels_norm = normalize_labels(val_labels, label_mean, label_std)
     test_labels_norm = normalize_labels(test_labels, label_mean, label_std)
 
-    # ── Linear Probe ────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("LINEAR PROBE")
     print("=" * 60)
@@ -323,7 +308,6 @@ def evaluate(args):
         use_wandb=use_wandb,
     )
 
-    # Final evaluation
     linear_model.eval()
     with torch.no_grad():
         val_pred = linear_model(val_features.to(device)).cpu()
@@ -345,7 +329,6 @@ def evaluate(args):
             "eval/linear_test_mse_alpha": test_mse_a,
         })
 
-    # ── kNN Regression ──────────────────────────────────────────
     print("\n" + "=" * 60)
     print("kNN REGRESSION")
     print("=" * 60)
@@ -407,7 +390,6 @@ def evaluate(args):
             "eval/knn_test_mse_alpha": test_knn_mse_a,
         })
 
-    # ── Summary ─────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
@@ -418,7 +400,6 @@ def evaluate(args):
     print(f"  {'kNN (k=' + str(best_k) + ')':<16s} {'Valid':<8s} {val_knn_mse:>10.6f} {val_knn_mse_z:>12.6f} {val_knn_mse_a:>12.6f}")
     print(f"  {'kNN (k=' + str(best_k) + ')':<16s} {'Test':<8s} {test_knn_mse:>10.6f} {test_knn_mse_z:>12.6f} {test_knn_mse_a:>12.6f}")
 
-    # ── Save results ────────────────────────────────────────────
     results = {
         "checkpoint": args.checkpoint,
         "embed_dim": embed_dim,
@@ -446,8 +427,6 @@ def evaluate(args):
     if use_wandb:
         wandb.finish()
 
-
-# ── CLI ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CF-JEPA Evaluation: Linear Probe + kNN")

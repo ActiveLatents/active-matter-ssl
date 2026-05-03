@@ -1,5 +1,3 @@
-# src/ssl_model/losses.py
-
 """
 Loss functions for Channel-Factored JEPA.
 
@@ -18,8 +16,6 @@ import torch
 import torch.nn.functional as F
 import math
 
-
-# ── Prediction loss ─────────────────────────────────────────────────────────
 
 def prediction_loss(predictions, targets):
     """
@@ -41,8 +37,6 @@ def prediction_loss(predictions, targets):
     return F.mse_loss(predictions, targets, reduction='none').sum(dim=-1).mean()
 
 
-# ── SIGReg ───────────────────────────────────────────────────────────────────
-
 def sigreg_loss(x, sketch_dim=64):
     """
     Per-sample Sketched Isotropic Gaussian Regularization (SIGReg).
@@ -52,20 +46,16 @@ def sigreg_loss(x, sketch_dim=64):
     along 1D random projections.
     """
     if x.dim() == 2:
-        x = x.unsqueeze(0)  # treat as B=1
+        x = x.unsqueeze(0) 
 
     B, N, D = x.shape
     x = x.float()
 
-    # 1. Shared random unit-column projection: D -> sketch_dim
     A = torch.randn(D, sketch_dim, device=x.device)
     A = A / (A.norm(p=2, dim=0, keepdim=True) + 1e-6)
 
-    # 2. Project data
-    # proj: (B, N, sketch_dim)
     proj = x @ A
 
-    # 3. Exact Analytical Epps-Pulley Integral (MMD)
     
     # Term 1: 1/N^2 * sum(exp(-0.5 * (z_j - z_k)^2))
     z1 = proj.unsqueeze(2)  # (B, N, 1, sketch_dim)
@@ -79,27 +69,19 @@ def sigreg_loss(x, sketch_dim=64):
     # Term 3: Constant 1/sqrt(3)
     term3 = 1.0 / math.sqrt(3.0)
 
-    # Combine terms. Multiplying by sqrt(2*pi) matches the exact scale of 
-    # the integrated ECF formula.
     loss = (term1 - term2 + term3) * math.sqrt(2 * math.pi)
 
     return loss.mean()  # average over batch and sketch dimensions
 
 
-# ── Quick test ───────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
 
     B, N, D = 4, 512, 384
 
-    # Per-sample Gaussian tokens → each sample's ECF matches Gaussian → loss ≈ 0
     x_gauss = torch.randn(B, N, D)
     loss_gauss = sigreg_loss(x_gauss)
     print(f"SIGReg (per-sample Gaussian):  {loss_gauss:.6f}  (expect ~0)")
 
-    # Per-sample collapse: all N tokens in sample b = same direction c_b
-    # Global distribution of B*N tokens looks Gaussian (c_b ~ N(0,I))
-    # but per-sample ECF is a Dirac delta → loss should be large
     x_collapsed = torch.stack([
         torch.randn(1, D).expand(N, D) for _ in range(B)
     ])
@@ -109,7 +91,6 @@ if __name__ == "__main__":
     print(f"SIGReg global (collapsed):     {loss_global_ok:.6f}  (may look ~0 — misses collapse)")
     print(f"SIGReg per-sample (collapsed): {loss_persample:.6f}  (expect >> 0)")
 
-    # Prediction loss
     pred = torch.randn(B, 50, D)
     tgt  = F.normalize(torch.randn(B, 50, D), dim=-1)
     print(f"Prediction loss (random):  {prediction_loss(pred, tgt):.4f}  (expect ~2.0)")

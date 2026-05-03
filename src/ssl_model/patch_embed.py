@@ -1,5 +1,3 @@
-# src/model/patch_embed.py
-
 """
 Channel-factored tubelet patch embeddings.
 
@@ -21,8 +19,6 @@ import torch.nn as nn
 
 from src.dataset import FIELD_GROUPS
 
-
-# ── Single field group embedder ─────────────────────────────────────────────
 
 class TubeletEmbedding(nn.Module):
     """
@@ -59,19 +55,15 @@ class TubeletEmbedding(nn.Module):
             tokens: (B, n_tokens, embed_dim)
             grid_shape: (n_t, n_h, n_w)
         """
-        # Rearrange to (B, C_field, T, H, W) for Conv3d
         x = x.permute(0, 2, 1, 3, 4)
 
         tokens = self.proj(x)  # (B, embed_dim, n_t, n_h, n_w)
         n_t, n_h, n_w = tokens.shape[2], tokens.shape[3], tokens.shape[4]
 
-        # Flatten spatial-temporal grid to sequence
         tokens = tokens.flatten(2).transpose(1, 2)  # (B, n_tokens, embed_dim)
 
         return tokens, (n_t, n_h, n_w)
 
-
-# ── Multi-field patch embedding ─────────────────────────────────────────────
 
 class ChannelFactoredPatchEmbed(nn.Module):
     """
@@ -82,7 +74,6 @@ class ChannelFactoredPatchEmbed(nn.Module):
     Output: (B, total_tokens, embed_dim), field_indices dict, grid_shape
     """
 
-    # Ordered list of field group names (order matters for token concatenation)
     GROUP_NAMES = ["concentration", "velocity", "orientation", "strain_rate"]
 
     def __init__(
@@ -97,13 +88,11 @@ class ChannelFactoredPatchEmbed(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
 
-        # Grid dimensions after patching
         self.n_t = n_frames // tube_t
         self.n_h = spatial_size // patch_h
         self.n_w = spatial_size // patch_w
         self.tokens_per_group = self.n_t * self.n_h * self.n_w
 
-        # One tubelet embedding per field group
         field_channels = {
             name: (end - start) for name, (start, end) in FIELD_GROUPS.items()
         }
@@ -118,7 +107,6 @@ class ChannelFactoredPatchEmbed(nn.Module):
             for name in self.GROUP_NAMES
         })
 
-        # Field group identity embeddings (semantic type, not spatial position)
         self.field_embed = nn.ParameterDict({
             name: nn.Parameter(torch.zeros(1, 1, embed_dim))
             for name in self.GROUP_NAMES
@@ -169,8 +157,6 @@ class ChannelFactoredPatchEmbed(nn.Module):
             x = field_dict[name]
             tokens, grid_shape = self.embeds[name](x)
 
-            # Only field-type identity is added here; spatial/temporal
-            # position is handled by 3D RoPE inside the transformer.
             tokens = tokens + self.field_embed[name]
 
             n_tokens = tokens.shape[1]
@@ -181,14 +167,11 @@ class ChannelFactoredPatchEmbed(nn.Module):
 
         all_tokens = torch.cat(all_tokens, dim=1)  # (B, total_tokens, embed_dim)
 
-        # Replicate pos_ids for each field group (same grid for all groups)
         n_groups = len(self.GROUP_NAMES)
         pos_ids = group_pos.repeat(n_groups, 1)  # (total_tokens, 3)
 
         return all_tokens, field_indices, grid_shape, pos_ids
 
-
-# ── Single shared patch embedding (ablation) ────────────────────────────────
 
 class SinglePatchEmbed(nn.Module):
     """
@@ -252,7 +235,7 @@ class SinglePatchEmbed(nn.Module):
         """
         device = next(iter(field_dict.values())).device
 
-        # Concat all fields along channel dim → (B, T, 11, H, W)
+        # Concat all fields along channel dim = (B, T, 11, H, W)
         x = torch.cat([field_dict[name] for name in self.GROUP_NAMES], dim=2)
 
         # Conv3d expects (B, C, T, H, W)
@@ -268,15 +251,12 @@ class SinglePatchEmbed(nn.Module):
         return tokens, field_indices, grid_shape, pos_ids
 
 
-# ── Quick test ──────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     embed = ChannelFactoredPatchEmbed(
         embed_dim=384, tube_t=2, patch_h=16, patch_w=16,
         n_frames=16, spatial_size=256,
     )
 
-    # Fake input matching SSL dataset output
     B = 2
     field_dict = {
         "concentration": torch.randn(B, 16, 1, 256, 256),

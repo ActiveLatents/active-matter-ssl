@@ -10,7 +10,7 @@ import yaml
 from torch.utils.data import Dataset, DataLoader
 
 
-# ── Channel layout ──────────────────────────────────────────────────────────
+# Channel layout
 CHANNEL_NAMES = [
     "concentration",                          # 1 ch  (scalar)
     "velocity_x", "velocity_y",               # 2 ch  (vector)
@@ -27,7 +27,7 @@ FIELD_GROUPS = {
 }
 
 
-# ── Normalization helpers ───────────────────────────────────────────────────
+# Normalization helpers
 
 def load_channel_stats(stats_path):
     """Load per-channel mean and std from stats.yaml."""
@@ -262,7 +262,7 @@ def build_dataloader(
     return loader
 
 
-# ── Quick sanity check ──────────────────────────────────────────────────────
+# Sanity check
 
 if __name__ == "__main__":
 

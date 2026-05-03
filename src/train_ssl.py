@@ -1,5 +1,3 @@
-# src/train_ssl.py
-
 """
 CF-JEPA SSL training script.
 
@@ -29,8 +27,6 @@ from src.dataset import build_dataloader
 from src.ssl_model import CFJEPA
 
 
-# ── Learning rate schedule ──────────────────────────────────────────────────
-
 def get_lr(step, total_steps, warmup_steps, base_lr, min_lr=1e-6):
     """Linear warmup + cosine decay."""
     if step < warmup_steps:
@@ -49,8 +45,6 @@ def get_ema_momentum(step, total_steps, base_ema=0.996, max_ema=1.0):
     progress = step / max(total_steps, 1)
     return max_ema - (max_ema - base_ema) * (1 + __import__("math").cos(__import__("math").pi * progress)) / 2
 
-
-# ── Checkpoint helpers ──────────────────────────────────────────────────────
 
 def save_checkpoint(path, model, optimizer, scaler, epoch, step, best_val_loss, config):
     torch.save({
@@ -73,8 +67,6 @@ def load_checkpoint(path, model, optimizer, scaler, device):
     print(f"  Resumed from checkpoint: epoch={ckpt['epoch']}, step={ckpt['step']}")
     return ckpt["epoch"], ckpt["step"], ckpt["best_val_loss"]
 
-
-# ── Validation ──────────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def validate(model, val_loader, device):
@@ -104,14 +96,11 @@ def validate(model, val_loader, device):
     }
 
 
-# ── Training loop ──────────────────────────────────────────────────────────
-
 def train(args):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # ── Config ──────────────────────────────────────────────────
     config = {
         # Data
         "data_dir": args.data_dir,
@@ -144,7 +133,6 @@ def train(args):
         "max_ema": args.max_ema,
     }
 
-    # ── Wandb ───────────────────────────────────────────────────
     use_wandb = not args.no_wandb
     if use_wandb:
         wandb.init(
@@ -154,7 +142,6 @@ def train(args):
             resume="allow",
         )
 
-    # ── Data ────────────────────────────────────────────────────
     print("Loading data...")
     train_loader = build_dataloader(
         data_dir=args.data_dir,
@@ -176,7 +163,6 @@ def train(args):
         num_workers=args.num_workers,
     )
 
-    # ── Model ───────────────────────────────────────────────────
     print("Initializing model...")
     model = CFJEPA(
         embed_dim=args.embed_dim,
@@ -199,7 +185,6 @@ def train(args):
 
     model.param_count()
 
-    # ── Optimizer ───────────────────────────────────────────────
     # Only optimize trainable parameters — target_encoder is frozen (EMA).
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -210,7 +195,6 @@ def train(args):
 
     scaler = GradScaler("cuda", enabled=False)  # bf16 doesn't need loss scaling
 
-    # ── LR schedule info ────────────────────────────────────────
     steps_per_epoch = len(train_loader)
     total_steps = args.epochs * steps_per_epoch
     warmup_steps = args.warmup_epochs * steps_per_epoch
@@ -219,7 +203,6 @@ def train(args):
     print(f"Total steps: {total_steps}")
     print(f"Warmup steps: {warmup_steps}")
 
-    # ── Resume from checkpoint ──────────────────────────────────
     start_epoch = 0
     global_step = 0
     best_val_loss = float("inf")
@@ -232,7 +215,6 @@ def train(args):
         )
         start_epoch += 1  # start from next epoch
 
-    # ── SIGUSR1 handler: checkpoint and exit for Slurm requeue ──
     current_epoch = start_epoch
 
     def _save_and_exit(signum, frame):
@@ -245,7 +227,6 @@ def train(args):
 
     signal.signal(signal.SIGUSR1, _save_and_exit)
 
-    # ── Training ────────────────────────────────────────────────
     print(f"\nStarting training from epoch {start_epoch}...")
 
     for epoch in range(start_epoch, args.epochs):
@@ -255,22 +236,17 @@ def train(args):
         epoch_start = time.time()
 
         for batch_idx, batch in enumerate(train_loader):
-            # Set LR
             lr = get_lr(global_step, total_steps, warmup_steps, args.base_lr)
             set_lr(optimizer, lr)
 
-            # Move to device
             field_dict = {k: v.to(device) for k, v in batch.items() if k != "labels"}
 
-            # Forward
             optimizer.zero_grad()
             with autocast("cuda", dtype=torch.bfloat16):
                 loss, loss_dict = model.forward_ssl(field_dict)
 
-            # Backward
             loss.backward()
 
-            # Gradient clipping
             if args.grad_clip > 0:
                 grad_norm = nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             else:
@@ -279,14 +255,12 @@ def train(args):
             # Step
             optimizer.step()
 
-            # EMA update of target encoder
             ema_momentum = get_ema_momentum(global_step, total_steps, args.base_ema, args.max_ema)
             model.update_target_encoder(ema_momentum)
 
             epoch_loss += loss.item()
             global_step += 1
 
-            # ── Logging ─────────────────────────────────────────
             if global_step % args.log_every == 0:
                 log_dict = {
                     "train/loss": loss.item(),
@@ -313,12 +287,10 @@ def train(args):
                     f"grad {grad_norm:.2f}"
                 )
 
-        # ── Epoch summary ───────────────────────────────────────
         epoch_time = time.time() - epoch_start
         avg_loss = epoch_loss / len(train_loader)
         print(f"\nEpoch {epoch+1}/{args.epochs} done in {epoch_time:.0f}s | avg loss: {avg_loss:.4f}")
 
-        # ── Validation ──────────────────────────────────────────
         if (epoch + 1) % args.val_every == 0:
             print("  Running validation...")
             val_metrics = validate(model, val_loader, device)
@@ -326,7 +298,6 @@ def train(args):
                 wandb.log(val_metrics, step=global_step)
             print(f"  val/loss: {val_metrics['val/loss']:.4f}")
 
-            # Save best model
             if val_metrics["val/loss"] < best_val_loss:
                 best_val_loss = val_metrics["val/loss"]
                 best_path = os.path.join(args.checkpoint_dir, "best.pt")
@@ -336,13 +307,11 @@ def train(args):
                 )
                 print(f"  New best val loss: {best_val_loss:.4f}")
 
-        # ── Checkpoint (every epoch for requeue safety) ─────────
         save_checkpoint(
             ckpt_path, model, optimizer, scaler,
             epoch, global_step, best_val_loss, config,
         )
 
-    # ── Save final encoder weights ──────────────────────────────
     encoder_path = os.path.join(args.checkpoint_dir, "encoder_final.pt")
     torch.save({
         "patch_embed_state_dict": model.patch_embed.state_dict(),
@@ -355,8 +324,6 @@ def train(args):
         wandb.finish()
     print("Training complete.")
 
-
-# ── CLI ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CF-JEPA SSL Training")

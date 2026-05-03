@@ -1,5 +1,3 @@
-# src/model/encoder.py
-
 """
 Shared Vision Transformer encoder with 3D RoPE.
 
@@ -75,7 +73,6 @@ class RoPE3D(nn.Module):
         """
         t_idx, h_idx, w_idx = pos_ids[..., 0], pos_ids[..., 1], pos_ids[..., 2]
 
-        # (B, N, dim_x) → unsqueeze head dim → (B, 1, N, dim_x)
         cos_t = self.cos_t[t_idx].unsqueeze(1)
         sin_t = self.sin_t[t_idx].unsqueeze(1)
         cos_h = self.cos_h[h_idx].unsqueeze(1)
@@ -83,7 +80,6 @@ class RoPE3D(nn.Module):
         cos_w = self.cos_w[w_idx].unsqueeze(1)
         sin_w = self.sin_w[w_idx].unsqueeze(1)
 
-        # Concatenate along head_dim: (B, 1, N, head_dim)
         cos = torch.cat([cos_t, cos_h, cos_w], dim=-1)
         sin = torch.cat([sin_t, sin_h, sin_w], dim=-1)
 
@@ -116,7 +112,6 @@ class Attention(nn.Module):
             q = rope.apply(q, pos_ids)
             k = rope.apply(k, pos_ids)
 
-        # Flash Attention: O(N) memory, never materializes the N×N matrix
         dropout_p = self.attn_drop_p if self.training else 0.0
         x = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
 
@@ -240,12 +235,9 @@ class ViTEncoder(nn.Module):
         return x
 
 
-# ── Quick test ──────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     encoder = ViTEncoder(embed_dim=384, depth=12, n_heads=6)
 
-    # Simulating ~820 unmasked tokens (10% of 8192) with random (t,h,w) indices
     x = torch.randn(2, 820, 384)
     pos_ids = torch.stack([
         torch.randint(0, 8,  (2, 820)),

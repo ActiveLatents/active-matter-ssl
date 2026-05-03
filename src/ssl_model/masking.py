@@ -1,5 +1,3 @@
-# src/model/masking.py
-
 """
 Masking strategies for Channel-Factored JEPA.
 
@@ -47,7 +45,6 @@ def within_field_block_mask(field_indices, grid_shape, mask_ratio=0.75, device="
     all_masked = []
 
     for name, (start, end) in field_indices.items():
-        # Sample temporal coverage with slight randomness around mask_ratio
         t_ratio = torch.empty(1, device=device).uniform_(
             max(0.5, mask_ratio - 0.15), min(1.0, mask_ratio + 0.15)
         ).item()
@@ -60,12 +57,10 @@ def within_field_block_mask(field_indices, grid_shape, mask_ratio=0.75, device="
         bh = max(1, min(n_h, round(n_h * spatial_ratio)))
         bw = max(1, min(n_w, round(n_w * spatial_ratio)))
 
-        # Random block origin (uniform over valid positions)
         t0 = torch.randint(0, max(1, n_t - bt + 1), (1,), device=device).item()
         h0 = torch.randint(0, max(1, n_h - bh + 1), (1,), device=device).item()
         w0 = torch.randint(0, max(1, n_w - bw + 1), (1,), device=device).item()
 
-        # Vectorized 3D block mask via broadcasting
         t_in = (torch.arange(n_t, device=device) >= t0) & \
                (torch.arange(n_t, device=device) < t0 + bt)
         h_in = (torch.arange(n_h, device=device) >= h0) & \
@@ -130,13 +125,12 @@ def generate_masks(field_indices, grid_shape, within_mask_ratio=0.75, device="cp
         within_masks: dict with keys "visible_ids" and "masked_ids"
         cross_masks:  dict with keys "visible_ids", "masked_ids", "target_group"
     """
-    # Within-field: mask a contiguous spatiotemporal block in each group
+    # Within-field
     w_visible, w_masked = within_field_block_mask(
         field_indices, grid_shape, mask_ratio=within_mask_ratio, device=device,
     )
 
-    # Cross-field: randomly pick one group to mask entirely
-    # Use torch RNG so this is reproducible with torch.manual_seed
+    # Cross-field
     group_names = list(field_indices.keys())
     target_group = group_names[torch.randint(len(group_names), (1,), device=device).item()]
     c_visible, c_masked = cross_field_mask(
@@ -170,10 +164,8 @@ def batch_mask_indices(mask_ids, batch_size):
     return mask_ids.unsqueeze(0).expand(batch_size, -1).contiguous()
 
 
-# ── Quick test ──────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    # n_t=8, n_h=16, n_w=16 → 2048 tokens per group
+    # n_t=8, n_h=16, n_w=16 = 2048 tokens per group
     field_indices = {
         "concentration": (0, 2048),
         "velocity":      (2048, 4096),
@@ -198,7 +190,6 @@ if __name__ == "__main__":
     print(f"Cross-field:  {n_cross_vis} visible + {n_cross_mask} masked "
           f"= {n_cross_vis + n_cross_mask} (target: {cross_masks['target_group']})")
 
-    # Verify no overlap and full coverage
     w_all = torch.cat([within_masks["visible_ids"], within_masks["masked_ids"]])
     assert w_all.unique().shape[0] == total, "Within-field mask error"
 
