@@ -40,22 +40,32 @@ scripts/
   evaluate.slurm          Slurm job for LP/kNN evaluation
 ```
 
-## Setup
+## Environment
+
+All training was run on NYU Torch HPC using a Singularity container with an overlay filesystem.
+
+- Python 3.11
+- PyTorch 2.5
+- CUDA 12.2
+
+To install Python dependencies inside the overlay:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Data should be placed at (or symlinked from) `/scratch/$NETID/dl_project_data/data` with the standard train/valid/test split as HDF5 files.
+Data lives at `/scratch/$NETID/dl_project_data/data` with the standard `train/valid/test` split as HDF5 files.
 
 ## Training
+
+All jobs were submitted via the Slurm scripts in `scripts/`. The commands below show the equivalent direct invocations.
 
 SSL pretraining:
 
 ```bash
 python -m src.train_ssl \
     --data_dir /scratch/$NETID/dl_project_data/data \
-    --checkpoint_dir runs/ssl \
+    --checkpoint_dir /scratch/$NETID/active-matter-ssl/runs/ssl \
     --epochs 30 \
     --embed_dim 384 \
     --encoder_depth 12 \
@@ -67,7 +77,7 @@ Supervised baseline:
 ```bash
 python -m src.train_supervised \
     --data_dir /scratch/$NETID/dl_project_data/data \
-    --output_dir runs/supervised \
+    --output_dir /scratch/$NETID/active-matter-ssl/runs/supervised \
     --epochs 50
 ```
 
@@ -77,9 +87,8 @@ Runs linear probe (100 epochs) and kNN regression on frozen encoder features:
 
 ```bash
 python -m src.evaluate \
-    --checkpoint runs/ssl/best.pt \
-    --data_dir /scratch/$NETID/dl_project_data/data \
-    --output_dir runs/eval
+    --checkpoint /scratch/$NETID/active-matter-ssl/runs/ssl/best.pt \
+    --data_dir /scratch/$NETID/dl_project_data/data
 ```
 
 ## Key results
