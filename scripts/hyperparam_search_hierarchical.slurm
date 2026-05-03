@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=hier_search
+#SBATCH --job-name=hyperparam_search
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 #SBATCH --time=00:30:00
